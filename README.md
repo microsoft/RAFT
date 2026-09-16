@@ -130,8 +130,7 @@ reporting. They return results in memory without saving them. `LocalPipeline` is
 provided for quick local experiments—not as a production search service.
 
 For production, process cases incrementally and persist results in a service such as
-<a href="https://learn.microsoft.com/en-us/azure/search/vector-search-overview"><img src="assets/azure-ai-search.svg" width="28" height="28" alt="Azure AI Search icon" /></a>
-**[Azure AI Search](https://learn.microsoft.com/en-us/azure/search/vector-search-overview)**,
+**[Microsoft Azure AI Search](https://learn.microsoft.com/en-us/azure/search/)**,
 which supports vector and hybrid retrieval. There is no need to load or reindex
 your entire case collection at once.
 
@@ -193,4 +192,3 @@ preprint is available.
 Released under the [MIT License](LICENSE). Contributions are welcome; please follow
 the [Microsoft Open Source Code of Conduct](CODE_OF_CONDUCT.md). Report security
 issues through the process in [SECURITY.md](SECURITY.md), not a public issue.
-The Azure service icon is used under [Microsoft's icon terms](https://learn.microsoft.com/en-us/azure/architecture/icons/#icon-terms).
