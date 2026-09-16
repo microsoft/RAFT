@@ -11,8 +11,6 @@
 
 [![Give your agent the benefit of experience: historical cases feed RAFT, which returns relevant evidence to a troubleshooting agent as its queries evolve.](assets/raft-hero.svg)](assets/raft-hero.svg)
 
-> Retrieve similar troubleshooting states, not just similar documents.
-
 RAFT is built for **technical support cases where resolution takes an investigation,
 not a single answer**:
 
@@ -24,7 +22,7 @@ Your troubleshooting agents can find similar cases at **the right stage of the
 investigation**—with the evidence, diagnostic steps, and resolution path together,
 rather than scattered across disconnected chunks.
 
-[Overview](#overview) · [Agent workflow](#agent-workflow) · [Quickstart](#quickstart) · [Production usage](#production-usage) · [Citation](#paper-and-citation)
+[Overview](#overview) · [Per-case extraction](#per-case-extraction-workflow) · [Quickstart](#quickstart) · [Production usage](#production-usage) · [Citation](#paper-and-citation)
 
 ## Overview
 
@@ -42,12 +40,12 @@ rather than scattered across disconnected chunks.
 An **optional case-level graph** connects cases through a configurable view, such
 as root cause and resolution, for expansion beyond the initial matches.
 
-## Agent workflow
+## Per-case extraction workflow
 
 [![Worker-reviewer extraction: bounded artifact batches update an evolving case state; both agents query source evidence, and the reviewer can inspect revision history.](assets/agent-workflow.png)](assets/agent-workflow.png)
 
 RAFT uses the **[OpenAI Agents SDK](https://github.com/openai/openai-agents-python)**
-as its agent backend for a **worker + final reviewer** workflow:
+as its agent backend to process each case through a **worker + final reviewer** workflow:
 
 - **Worker passes** process ordered, whole-artifact batches and refine shared state
   through JSON Patch. State and handoff notes carry forward, rather than the entire
@@ -111,7 +109,7 @@ for result in results["results"]:
 ```
 
 `top_k` limits distinct cases per query; `max_chars` limits the returned context
-in **characters, not tokens**. Structured matches remain available in `candidates`.
+in characters. Structured matches remain available in `candidates`.
 Supply `format_case(hit) -> str` to customize the text using the full case and
 matched entry index. See the [notebook](examples/jira_walkthrough.ipynb) for
 formatting, filtering, and optional graph expansion.
@@ -125,7 +123,7 @@ experiments.
 
 Process cases incrementally and store/search the results in a service such as
 **[Microsoft Azure AI Search](https://learn.microsoft.com/en-us/azure/search/)**,
-which supports vector and hybrid retrieval—without loading the entire corpus at once.
+which supports vector and hybrid retrieval.
 
 ```python
 # Pseudocode: configure agents/models once; source, storage, and retry queue are yours.
@@ -141,9 +139,6 @@ async for batch in case_source.batches(size=100):
         extracted["failed_cases"] + embedded["failed_cases"]
     )
 ```
-
-Provide your own storage/search adapter, preserving `case_id` and `item_index`
-to return the parent case and matched state. An Azure AI Search connector is not bundled.
 
 ## Explore the code
 
