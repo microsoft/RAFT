@@ -139,8 +139,8 @@ async def test_small_case_starts_unread_and_finishes_in_one_pass(monkeypatch):
         assert payload["current_state"] == {}
         assert payload["target_output_schema"] == Output.model_json_schema()
         assert payload["pass_number"] == 1
-        assert "max_query_chars" not in payload
-        assert context.max_query_chars == 1000
+        assert "query_budget" not in payload
+        assert context.query_budget == {"unit": "chars", "limit": 1000}
         assert payload["validation_error"] is None
         coverage = payload["coverage"]
         assert coverage["covered_count"] == 0 and coverage["covered_ranges"] == []
@@ -158,7 +158,7 @@ async def test_small_case_starts_unread_and_finishes_in_one_pass(monkeypatch):
         return SimpleNamespace(new_items=[], final_output="done")
 
     monkeypatch.setattr(openai_agents.Runner, "run", run)
-    result = await run_cases(cases=[case()], **options(max_query_chars=1000))
+    result = await run_cases(cases=[case()], **options(query_budget={"unit": "chars", "limit": 1000}))
     assert received == ["scan"]
     assert result["extracted_cases"][0].execution["passes"] == 1
     assert "coverage" not in result["extracted_cases"][0].model_dump()
@@ -188,7 +188,7 @@ async def test_worker_retry_resumes_committed_state_and_ranges(monkeypatch):
 
     monkeypatch.setattr(openai_agents.Runner, "run", run)
     monkeypatch.setattr("raft.extraction.runner._retry_delay", lambda *args: 0)
-    result = await run_cases(cases=[case()], **options(retries=1, max_batch_chars=31))
+    result = await run_cases(cases=[case()], **options(retries=1, batch_budget={"unit": "chars", "limit": 31}))
     output = result["extracted_cases"][0]
     assert output.output.timeline == ["first", "second"]
     assert [r["state"]["timeline"] for r in output.execution["revisions"]] == [
@@ -239,7 +239,7 @@ async def test_retry_budget_is_case_wide_and_failed_finished_pass_is_not_committ
     monkeypatch.setattr("raft.extraction.runner._retry_delay", lambda *args: 0)
     data = case()
     data["artifacts"].append({"order": 3, "text": "third"})
-    result = await run_cases(cases=[data], **options(retries=1, max_batch_chars=31))
+    result = await run_cases(cases=[data], **options(retries=1, batch_budget={"unit": "chars", "limit": 31}))
     failure = result["failed_cases"][0]
     assert passes == [1, 2, 2, 3]
     assert failure["failure_type"] == "retry_exhausted"
@@ -263,7 +263,7 @@ async def test_timeout_bounds_entire_worker_attempt(monkeypatch):
         return SimpleNamespace(new_items=[], final_output="done")
 
     monkeypatch.setattr(openai_agents.Runner, "run", run)
-    result = await run_cases(cases=[case()], **options(timeout=0.6, max_batch_chars=31))
+    result = await run_cases(cases=[case()], **options(timeout=0.6, batch_budget={"unit": "chars", "limit": 31}))
     failure = result["failed_cases"][0]
     assert failure["error_category"] == "timeout"
     assert failure["partial_state"]["timeline"] == ["partial"]
@@ -304,7 +304,7 @@ async def test_missing_finish_and_pass_limit(monkeypatch):
 
     monkeypatch.setattr(openai_agents.Runner, "run", endless)
     result = await run_cases(
-        cases=[{**case(), "artifacts": [{"text": "a"}] * 3}], **options(max_passes=2, max_batch_chars=13)
+        cases=[{**case(), "artifacts": [{"text": "a"}] * 3}], **options(max_passes=2, batch_budget={"unit": "chars", "limit": 13})
     )
     assert result["failed_cases"][0]["error_category"] == "max_case_passes"
 
@@ -348,7 +348,7 @@ def test_sql_order_budget_and_atomic_patches_with_validation_repair():
         metadata_field="meta",
         artifacts_field="artifacts",
         artifact_sort_field="order",
-        max_query_chars=200,
+        query_budget={"unit": "chars", "limit": 200},
         final_output_type=Output,
     )
     try:

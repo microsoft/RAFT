@@ -11,6 +11,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from raft._json import _to_json
+from raft._text_budget import budget_summary, measure_text, validate_budget
 
 MAX_SQL_SECONDS = 2.0
 DEFAULT_BATCH_CHARS = 400_000
@@ -20,16 +21,18 @@ DEFAULT_QUERY_CHARS = 50_000
 class ArtifactTooLargeError(ValueError):
     """An intact source artifact cannot fit in a worker batch."""
 
-    def __init__(self, position: int, original_position: int, size: int, limit: int):
+    def __init__(
+        self, position: int, original_position: int, size: int, budget: dict[str, Any]
+    ):
         self.details = {
             "artifact_position": position,
             "original_position": original_position,
-            "artifact_chars": size,
-            "max_batch_chars": limit,
+            "artifact_size": size,
+            "batch_budget": budget_summary(budget),
         }
         super().__init__(
             f"Artifact at position {position} (original position {original_position}) has "
-            f"{size} serialized characters, exceeding max_batch_chars={limit}. "
+            f"{size} {budget['unit']}, exceeding batch_budget.limit={budget['limit']}. "
             "Increase the limit or split the artifact during preprocessing."
         )
 
@@ -40,7 +43,7 @@ class CaseContext:
     metadata: dict[str, Any]
     connection: sqlite3.Connection
     artifact_char_counts: list[int]
-    max_query_chars: int
+    query_budget: dict[str, Any]
     final_output_type: type[BaseModel]
     _writer: sqlite3.Connection = field(repr=False)
     _database_uri: str = field(repr=False)
@@ -71,6 +74,7 @@ class CaseContext:
             metadata=copy.deepcopy(self.metadata),
             pending_state=copy.deepcopy(output),
             pending_edits=[],
+            query_budget=dict(self.query_budget),
             pass_finished=False,
             is_final_batch=True,
             stage="reviewer",
@@ -122,30 +126,36 @@ class CaseContext:
             result = {"columns": columns, "rows": rows, "row_count": 0}
             too_large = {
                 "error": "query_result_too_large",
-                "max_query_chars": self.max_query_chars,
+                "query_budget": budget_summary(self.query_budget),
                 "suggestion": (
                     "Select fewer columns, narrow the query, paginate with ORDER BY and "
                     "LIMIT/OFFSET, or use substr() for large fields (1-based offsets)."
                 ),
             }
-            # Match json.dumps(result, ensure_ascii=False, default=str), including
-            # the wrapper, row separators, and changing row_count digit width.
-            # Incremental accounting avoids repeatedly serializing the whole result.
-            size = len(json.dumps(result, ensure_ascii=False, default=str))
-            if size > self.max_query_chars:
+            # Characters are additive; tokens must count each complete candidate
+            # response, including the wrapper and changing row_count digit width.
+            size = measure_text(
+                json.dumps(result, ensure_ascii=False, default=str), self.query_budget
+            )
+            if size > self.query_budget["limit"]:
                 return too_large
             for values in cursor:
                 row = dict(zip(columns, values, strict=True))
                 count = len(rows)
-                size += (
-                    len(json.dumps(row, ensure_ascii=False, default=str))
-                    + (2 if count else 0)
-                    + len(str(count + 1)) - len(str(count))
-                )
-                if size > self.max_query_chars:
-                    return too_large
+                if self.query_budget["unit"] == "chars":
+                    size += (
+                        len(json.dumps(row, ensure_ascii=False, default=str))
+                        + (2 if count else 0)
+                        + len(str(count + 1)) - len(str(count))
+                    )
                 rows.append(row)
-            result["row_count"] = len(rows)
+                result["row_count"] = count + 1
+                if self.query_budget["unit"] == "tokens":
+                    size = measure_text(
+                        json.dumps(result, ensure_ascii=False, default=str), self.query_budget
+                    )
+                if size > self.query_budget["limit"]:
+                    return too_large
             return result
         except sqlite3.Error as exc:
             return {"error": str(exc)}
@@ -162,10 +172,16 @@ def _build_case_context(
     artifacts_field: str,
     metadata_field: str,
     artifact_sort_field: str | None,
-    max_query_chars: int = DEFAULT_QUERY_CHARS,
+    query_budget: dict[str, Any] | None = None,
     final_output_type: type[BaseModel] = BaseModel,
-    max_batch_chars: int | None = None,
+    batch_budget: dict[str, Any] | None = None,
 ) -> CaseContext:
+    query_budget = validate_budget(
+        {"unit": "chars", "limit": DEFAULT_QUERY_CHARS} if query_budget is None else query_budget,
+        "query_budget",
+    )
+    if batch_budget is not None:
+        batch_budget = validate_budget(batch_budget, "batch_budget")
     case_id = case[id_field]
     metadata = case[metadata_field]
     artifacts = list(enumerate(case[artifacts_field]))
@@ -178,8 +194,10 @@ def _build_case_context(
     for position, (original_position, artifact) in enumerate(artifacts):
         artifact_json = _to_json(artifact)
         char_count = len(artifact_json)
-        if max_batch_chars is not None and char_count > max_batch_chars:
-            raise ArtifactTooLargeError(position, original_position, char_count, max_batch_chars)
+        if batch_budget is not None:
+            size = measure_text(artifact_json, batch_budget)
+            if size > batch_budget["limit"]:
+                raise ArtifactTooLargeError(position, original_position, size, batch_budget)
         sort_value = (
             _to_json(artifact[artifact_sort_field])
             if artifact_sort_field is not None and artifact.get(artifact_sort_field) is not None
@@ -224,7 +242,7 @@ def _build_case_context(
             metadata=metadata,
             connection=_reader_connection(database_uri, stage="worker"),
             artifact_char_counts=artifact_char_counts,
-            max_query_chars=max_query_chars,
+            query_budget=query_budget,
             final_output_type=final_output_type,
             _writer=connection,
             _database_uri=database_uri,

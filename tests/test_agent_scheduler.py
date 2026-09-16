@@ -165,7 +165,7 @@ async def test_worker_passes_and_reviews_share_agent_budget(monkeypatch, agent_c
             cases=[case(str(i)) for i in range(5)],
             **options(
                 reviewer_agent=reviewer, concurrency=3, agent_concurrency=agent_concurrency,
-                max_batch_chars=31,
+                batch_budget={"unit": "chars", "limit": 31},
             ),
         )
     assert not result["failed_cases"], result

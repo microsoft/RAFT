@@ -193,11 +193,11 @@ async def test_char_budget_is_strict_whole_case_ranked_prefix():
     retriever = LocalRetriever(cases=cases, embeddings=rows)
     unlimited = (await search(retriever))[0]
     size = len(format_case(unlimited["candidates"][0]))
-    result = (await search(retriever, max_chars=size, top_k=3))[0]
+    result = (await search(retriever, context_budget={"unit": "chars", "limit": size}, top_k=3))[0]
     assert [hit["id"] for hit in result["candidates"]] == ["a"]
     assert result["used_chars"] == size and result["truncated"]
     assert result["formatted_context"] == format_case(result["candidates"][0])
-    result = (await search(retriever, max_chars=size - 1))[0]
+    result = (await search(retriever, context_budget={"unit": "chars", "limit": size - 1}))[0]
     assert result["candidates"] == [] and result["truncated"]
     assert result["used_chars"] == 0
     assert result["formatted_context"] == ""
@@ -227,7 +227,7 @@ async def test_default_context_contains_state_and_anchor_but_no_diagnostics():
     assert cases[0].model_dump() == original
     budgeted = (await search(
         LocalRetriever(cases=cases, embeddings=rows),
-        max_chars=result["used_chars"], top_k=1,
+        context_budget={"unit": "chars", "limit": result["used_chars"]}, top_k=1,
     ))[0]
     assert budgeted["formatted_context"] == result["formatted_context"]
     assert len(budgeted["candidates"]) == 1
@@ -290,7 +290,8 @@ async def test_custom_formatter_receives_full_hit_and_runs_in_worker_thread():
 async def test_formatted_budget_counts_exact_text_and_separators(limit, ids, text, truncated):
     cases, rows = fixture()
     result = (await search(
-        LocalRetriever(cases=cases, embeddings=rows), top_k=3, max_chars=limit,
+        LocalRetriever(cases=cases, embeddings=rows), top_k=3,
+        context_budget=None if limit is None else {"unit": "chars", "limit": limit},
         format_case=lambda hit: {"a": "aaa", "b": "bb", "c": "c"}[hit["id"]],
     ))[0]
     assert [hit["id"] for hit in result["candidates"]] == ids
@@ -310,7 +311,7 @@ async def test_budget_stops_at_first_oversize_case_and_formats_no_lower_candidat
         return {"a": "aaa", "b": "too long", "c": "c"}[hit["id"]]
 
     result = (await search(
-        LocalRetriever(cases=cases, embeddings=rows), max_chars=6, format_case=formatter,
+        LocalRetriever(cases=cases, embeddings=rows), context_budget={"unit": "chars", "limit": 6}, format_case=formatter,
     ))[0]
     assert seen == ["a", "b"]
     assert [hit["id"] for hit in result["candidates"]] == ["a"]
@@ -325,7 +326,7 @@ async def test_unicode_budget_is_character_length_not_bytes_and_applies_per_quer
     text = "café \U0001f600"
     results = await search(
         LocalRetriever(cases=cases, embeddings=rows), ["query", "vertical"], top_k=1,
-        max_chars=len(text), format_case=lambda hit: text,
+        context_budget={"unit": "chars", "limit": len(text)}, format_case=lambda hit: text,
     )
     assert len(text.encode("utf-8")) > len(text)
     assert [r["candidates"][0]["id"] for r in results] == ["a", "b"]
@@ -437,7 +438,7 @@ async def test_output_only_custom_formatter_and_empty_string_are_preserved():
         retriever, top_k=1, format_case=lambda hit: hit["case"].output.model_dump_json(),
     ))[0]
     assert json.loads(result["formatted_context"]) == cases[0].output.model_dump()
-    result = (await search(retriever, top_k=1, max_chars=0, format_case=lambda hit: ""))[0]
+    result = (await search(retriever, top_k=1, context_budget={"unit": "chars", "limit": 0}, format_case=lambda hit: ""))[0]
     assert len(result["candidates"]) == 1 and not result["truncated"]
     assert result["formatted_context"] == "" and result["used_chars"] == 0
 

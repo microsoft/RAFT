@@ -152,7 +152,7 @@ async def test_pipeline_forwards_formatter_and_budgets_without_changing_saved_hi
 
     reopened = pipeline(tmp_path)
     result = (await reopened.retrieve(
-        ["opening"], top_k=1, max_chars=3, format_case=formatter,
+        ["opening"], top_k=1, context_budget={"unit": "chars", "limit": 3}, format_case=formatter,
     ))["results"][0]
     assert len(received) == 1
     assert result["formatted_context"] == f"{received[0]['id']}:{received[0]['item_index']}"
@@ -305,7 +305,7 @@ async def test_graph_refresh_and_reuse_and_char_filter_retrieval(tmp_path):
     assert len(result["candidates"]) == 2
     one = (await p.retrieve(["query"], case_filter=lambda q, c: c.id == "b"))["results"][0]
     assert [h["id"] for h in one["candidates"]] == ["b"]
-    assert (await p.retrieve(["query"], max_chars=0))["results"][0]["candidates"] == []
+    assert (await p.retrieve(["query"], context_budget={"unit": "chars", "limit": 0}))["results"][0]["candidates"] == []
 
 
 @pytest.mark.asyncio

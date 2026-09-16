@@ -133,7 +133,7 @@ async def test_reviewer_recovers_deleted_content_and_filter_sees_corrected_state
             assert payload["worker_final_revision"] == 2
             assert payload["coverage"]["complete"]
             assert payload["target_output_schema"] == Output.model_json_schema()
-            assert "state_revisions" not in payload and "max_query_chars" not in payload
+            assert "state_revisions" not in payload and "query_budget" not in payload
             assert payload["output"]["timeline"] == ["later"]
             rows = context.query(
                 "SELECT revision_id, json_extract(state_json, '$.timeline') AS timeline "
@@ -166,7 +166,7 @@ async def test_reviewer_recovers_deleted_content_and_filter_sees_corrected_state
 
     monkeypatch.setattr(sdk.Runner, "run", run)
     result = await run_cases(cases=[case()], **options(
-        reviewer_agent=reviewer, max_batch_chars=31, should_keep=should_keep,
+        reviewer_agent=reviewer, batch_budget={"unit": "chars", "limit": 31}, should_keep=should_keep,
     ))
     assert not result["failed_cases"], result
     record = result["extracted_cases" if keep else "filtered_cases"][0]

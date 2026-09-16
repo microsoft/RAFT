@@ -229,7 +229,7 @@ async def test_real_sdk_worker_passes_retry_usage_and_tool_order(monkeypatch):
         ]
     )
     monkeypatch.setattr("raft.extraction.runner._retry_delay", lambda *args: 0)
-    result = await run_cases(**options(model, retries=1, max_batch_chars=13))
+    result = await run_cases(**options(model, retries=1, batch_budget={"unit": "chars", "limit": 13}))
     assert not result["failed_cases"], result
     case = result["extracted_cases"][0]
     assert case.output.text == "second"
@@ -353,7 +353,7 @@ async def test_concurrent_cases_do_not_share_tool_outputs_or_usage():
             {"id": str(i), "meta": {}, "items": [{"text": "a"}, {"text": "b"}]}
             for i in range(4)
         ],
-        max_batch_chars=13,
+        batch_budget={"unit": "chars", "limit": 13},
         _agent_runner=RecordingBackend(),
     )
     result = await run_cases(**config)

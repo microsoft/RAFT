@@ -82,15 +82,16 @@ def test_whole_artifact_batches_are_ordered_bounded_and_retryable(limit):
         metadata_field="metadata",
         artifact_sort_field="seq",
         final_output_type=State,
-        max_query_chars=1,
+        query_budget={"unit": "chars", "limit": 1},
     )
     try:
+        budget = {"unit": "chars", "limit": limit}
         position = offset = 0
         fragments = {i: [] for i in range(3)}
         expected = sorted(enumerate(data()["items"]), key=lambda pair: pair[1]["seq"])
         while position < 3:
-            batch = next_batch(context, position, offset, limit)
-            assert batch == next_batch(context, position, offset, limit)
+            batch = next_batch(context, position, offset, budget)
+            assert batch == next_batch(context, position, offset, budget)
             assert 0 < batch.source_chars <= limit
             assert batch.source_chars == sum(len(item["artifact_json"]) for item in batch.items)
             for item in batch.items:
@@ -112,8 +113,8 @@ def test_whole_artifact_batches_are_ordered_bounded_and_retryable(limit):
 @pytest.mark.parametrize("limit", [0, -1, 1.5, "10"])
 async def test_invalid_batch_budget_fails_before_agent_run(limit):
     backend = Backend(lambda *args: pytest.fail("Agent should not run"))
-    with pytest.raises(ValueError, match="max_batch_chars must be a positive integer"):
-        await extract(backend, max_batch_chars=limit)
+    with pytest.raises(ValueError, match="batch_budget.limit must be a positive integer"):
+        await extract(backend, batch_budget={"unit": "chars", "limit": limit})
 
 
 @pytest.mark.asyncio
@@ -124,7 +125,7 @@ async def test_complete_source_delivery_without_any_sql_calls():
         assert finish(context, {"fragments": fragments})["ok"]
 
     backend = Backend(handler)
-    result = await extract(backend, max_batch_chars=50, max_query_chars=1)
+    result = await extract(backend, batch_budget={"unit": "chars", "limit": 50}, query_budget={"unit": "chars", "limit": 1})
     assert not result["failed_cases"], result
     case = result["extracted_cases"][0]
     expected = "".join(_to_json(item) for item in sorted(data()["items"], key=lambda x: x["seq"]))
@@ -144,7 +145,7 @@ async def test_failed_batch_retries_exact_batch_without_advancing(monkeypatch):
 
     monkeypatch.setattr("raft.extraction.runner._retry_delay", lambda *args: 0)
     backend = Backend(handler)
-    result = await extract(backend, max_batch_chars=50, retries=1)
+    result = await extract(backend, batch_budget={"unit": "chars", "limit": 50}, retries=1)
     assert not result["failed_cases"], result
     assert backend.prompts[1] == backend.prompts[2]
     coverage = backend.prompts[2]["coverage"]
@@ -164,7 +165,7 @@ async def test_sql_can_revisit_or_look_ahead_without_advancing_batch_coverage():
         assert finish(context, {"fragments": []})["ok"]
 
     backend = Backend(handler)
-    result = await extract(backend, max_batch_chars=50, max_query_chars=10000)
+    result = await extract(backend, batch_budget={"unit": "chars", "limit": 50}, query_budget={"unit": "chars", "limit": 10000})
     assert not result["failed_cases"], result
     assert len(backend.prompts) == 3
     assert backend.prompts[1]["coverage"]["covered_count"] == 1
@@ -177,7 +178,7 @@ async def test_ineligible_output_still_reads_all_batches_and_is_retained():
         assert finish(context, {"fragments": [], "extractable": False})["ok"]
 
     backend = Backend(handler)
-    result = await extract(backend, max_batch_chars=50)
+    result = await extract(backend, batch_budget={"unit": "chars", "limit": 50})
     assert result["summary"]["extracted"] == 1
     assert len(backend.prompts) > 1
     assert "coverage" not in result["extracted_cases"][0].model_dump()
@@ -187,7 +188,7 @@ async def test_ineligible_output_still_reads_all_batches_and_is_retained():
 @pytest.mark.asyncio
 async def test_pass_limit_returns_failure_with_whole_artifact_coverage():
     backend = Backend(lambda context, prompt, count: finish(context, {"fragments": []}))
-    result = await extract(backend, max_batch_chars=50, max_passes=2)
+    result = await extract(backend, batch_budget={"unit": "chars", "limit": 50}, max_passes=2)
     assert not result["extracted_cases"]
     failure = result["failed_cases"][0]
     assert failure["error_category"] == "max_case_passes"
@@ -199,7 +200,7 @@ async def test_pass_limit_returns_failure_with_whole_artifact_coverage():
 @pytest.mark.asyncio
 async def test_missing_finish_does_not_commit_delivery():
     backend = Backend(lambda *args: None)
-    result = await extract(backend, max_batch_chars=50, retries=0)
+    result = await extract(backend, batch_budget={"unit": "chars", "limit": 50}, retries=0)
     failure = result["failed_cases"][0]
     assert failure["coverage"]["covered_count"] == 0
     assert failure["coverage"]["partial_artifact"] is None
@@ -240,7 +241,7 @@ async def test_oversized_last_artifact_fails_entire_case_without_agents_or_retry
     raw = data()
     raw["items"][0]["text"] = "x" * 100
     backend = NoAgents(lambda *args: pytest.fail("Preflight must check ALL artifacts"))
-    result = await extract(backend, case=raw, max_batch_chars=50, retries=3)
+    result = await extract(backend, case=raw, batch_budget={"unit": "chars", "limit": 50}, retries=3)
     assert not result["extracted_cases"]
     failure = result["failed_cases"][0]
     assert failure["error_category"] == "artifact_too_large"
@@ -249,7 +250,8 @@ async def test_oversized_last_artifact_fails_entire_case_without_agents_or_retry
     assert failure["execution"]["tool_calls"] == []
     assert failure["details"] == {
         "artifact_position": 1, "original_position": 0,
-        "artifact_chars": len(_to_json(raw["items"][0])), "max_batch_chars": 50,
+        "artifact_size": len(_to_json(raw["items"][0])),
+        "batch_budget": {"unit": "chars", "limit": 50},
     }
 
 
@@ -266,7 +268,7 @@ async def test_exact_character_boundary_is_accepted_and_other_cases_continue():
         ],
         worker_agent=object(), reviewer_agent=object(), _agent_runner=backend, output_type=State,
         id_field="id", artifacts_field="items", metadata_field="metadata",
-        max_batch_chars=limit, retries=2, rpm=1000,
+        batch_budget={"unit": "chars", "limit": limit}, retries=2, rpm=1000,
     )
     assert [c.id for c in result["extracted_cases"]] == ["boundary"]
     assert [c["id"] for c in result["failed_cases"]] == ["oversized"]

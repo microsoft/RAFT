@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Any
 
+from raft._text_budget import measure_text
+
 from .context import ArtifactTooLargeError, CaseContext
 
 
@@ -18,27 +20,35 @@ class ArtifactBatch:
         return {"items": self.items, "source_chars": self.source_chars, "is_last": self.is_last}
 
 
-def next_batch(context: CaseContext, position: int, offset: int, limit: int) -> ArtifactBatch:
+def next_batch(
+    context: CaseContext, position: int, offset: int, budget: dict[str, Any]
+) -> ArtifactBatch:
     """Pack whole artifacts into a batch; never split source JSON.
 
-    limit counts source JSON characters, not prompt wrappers or JSON escaping.
-    This internal read is independent of the per-query result character limit.
+    The budget counts concatenated source JSON, not prompt wrappers or escaping.
+    Token counts are measured on that combined string, not added per artifact.
+    This internal read is independent of the per-query result budget.
     """
     if offset:
         raise ValueError("Batch cursors must start at an artifact boundary")
     items = []
     used = 0
+    source = ""
     total = len(context.artifact_char_counts)
-    while position < total and used < limit:
+    while position < total:
         size = context.artifact_char_counts[position]
-        if items and size > limit - used:
-            break
         original_position, content = context.connection.execute(
             "SELECT original_position, artifact_json FROM artifacts WHERE position = ?",
             (position,),
         ).fetchone()
-        if size > limit:
-            raise ArtifactTooLargeError(position, original_position, size, limit)
+        candidate_source = source + content if budget["unit"] == "tokens" else ""
+        measured = (
+            measure_text(candidate_source, budget) if budget["unit"] == "tokens" else used + size
+        )
+        if measured > budget["limit"]:
+            if items:
+                break
+            raise ArtifactTooLargeError(position, original_position, measured, budget)
         items.append(
             {
                 "position": position,
@@ -50,5 +60,6 @@ def next_batch(context: CaseContext, position: int, offset: int, limit: int) -> 
             }
         )
         used += size
+        source = candidate_source
         position += 1
     return ArtifactBatch(items, used, position, 0, position == total)

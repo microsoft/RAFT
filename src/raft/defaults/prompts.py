@@ -107,7 +107,7 @@ the separate eligibility assessment after all worker passes.
 
 <pass_input>
 Each Pass context contains id, pass_number, metadata, target_output_schema,
-current_state, coverage, batch, max_batch_chars, and validation_error.
+current_state, coverage, batch, batch_budget, and validation_error.
 Continue from current_state rather than starting over. Process every item in
 batch.items in order. Each item provides position, original_position, start_char,
 end_char_exclusive, total_chars, and artifact_json; artifact_json contains the full
@@ -139,7 +139,7 @@ evidence missing from current_state. The source table is
 artifacts(position, original_position, sort_value, char_count, artifact_json).
 You can query any positions, but this does not skip future batches or advance coverage.
 Each SQL query has a size limit for the full serialized response, independent of
-max_batch_chars. On query_result_too_large, select fewer fields, narrow the query,
+batch_budget. On query_result_too_large, select fewer fields, narrow the query,
 paginate with ORDER BY and LIMIT/OFFSET, or use substr() (1-based offsets).
 SQL returns complete results or an error, never partial results.
 </supplementary_sql>

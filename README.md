@@ -89,27 +89,34 @@ For other models, providers, and authentication options, see the OpenAI Agents S
 [models](https://openai.github.io/openai-agents-python/models/) and
 [configuration](https://openai.github.io/openai-agents-python/config/) guides.
 
-Check out our [example notebook](examples/jira_walkthrough.ipynb) for usage guidance.
+### 3. Initialize, index, and retrieve
 
-### 3. Retrieve
-
-Query a configured and indexed `LocalPipeline`:
+Use the `extraction` and `embedding` settings from the
+[example notebook](examples/jira_walkthrough.ipynb):
 
 ```python
-results = await pipeline.retrieve(
-    ["SSO login fails after certificate rotation."],
-    top_k=5,
-    max_chars=16_000,
-)
+from raft import LocalPipeline
 
+pipeline = LocalPipeline("outputs/demo", extraction=extraction, embedding=embedding)
+texts = [
+    "SSO login failed. Replacing the expired certificate restored access.",
+    "Uploads timed out. Increasing the proxy timeout fixed the issue.",
+    "Requests returned stale data. Clearing the cache resolved the problem.",
+]
+await pipeline.index([
+    {"id": f"case-{i}", "metadata": {}, "artifacts": [{"text": text}]}
+    for i, text in enumerate(texts)
+])
+
+results = await pipeline.retrieve(["SSO login fails after certificate rotation."], top_k=3)
 for result in results["results"]:
     if result["error"]:
         raise RuntimeError(result["error"])
     print(result["formatted_context"])
 ```
 
-`top_k` limits distinct cases per query; `max_chars` limits the returned context
-in characters. Structured matches remain available in `candidates`.
+`top_k` limits distinct cases per query. Structured matches remain available
+in `candidates`.
 Supply `format_case(hit) -> str` to customize the text using the full case and
 matched entry index. See the [notebook](examples/jira_walkthrough.ipynb) for
 formatting, filtering, and optional graph expansion.

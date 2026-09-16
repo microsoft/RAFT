@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence
 from pydantic import BaseModel, ValidationError
 
 from raft._json import _id_key
+from raft._text_budget import validate_budget
 from raft.cases import ExtractedCase
 from raft.progress import CaseProgress
 from raft.runtime import (
@@ -64,8 +65,8 @@ async def run_cases(
     reviewer_agent: Agent[CaseContext],
     should_keep: Callable[[ExtractedCase], bool] | None = None,
     artifact_sort_field: str | None = None,
-    max_batch_chars: int = DEFAULT_BATCH_CHARS,
-    max_query_chars: int = DEFAULT_QUERY_CHARS,
+    batch_budget: dict[str, Any] | None = None,
+    query_budget: dict[str, Any] | None = None,
     concurrency: int = 4,
     agent_concurrency: int | None = None,
     timeout: float = 300.0,
@@ -82,9 +83,13 @@ async def run_cases(
     """Extract every case through ordered preloaded batches and tool-based edits.
 
     Each pass receives committed state, runner-owned coverage, and the next batch.
-    max_batch_chars bounds source JSON characters; max_query_chars separately
-    bounds each complete serialized SQL-tool response. Neither bounds the full
-    model context window.
+    batch_budget bounds concatenated source artifact JSON, excluding prompt
+    wrappers and escaping; query_budget separately bounds each complete serialized
+    SQL-tool response. Each is {"unit": "chars" | "tokens", "limit": positive int}.
+    Token mode requires count_tokens, a synchronous, deterministic str -> int
+    callback returning a nonnegative integer. Character mode forbids this callback.
+    None selects defaults of 400,000 batch chars and 50,000 query chars.
+    Neither budget bounds the full model context window.
     All artifacts must be supplied before completion. Every successful output
     is retained. Each successful pass saves a revision. The required reviewer can
     query history and correct the output after all worker passes. Its draft is
@@ -115,10 +120,14 @@ async def run_cases(
         type(agent_concurrency) is not int or agent_concurrency < 1
     ):
         raise ValueError("agent_concurrency must be a positive integer or None")
-    if type(max_batch_chars) is not int or max_batch_chars < 1:
-        raise ValueError("max_batch_chars must be a positive integer")
-    if type(max_query_chars) is not int or max_query_chars < 1:
-        raise ValueError("max_query_chars must be a positive integer")
+    batch_budget = validate_budget(
+        {"unit": "chars", "limit": DEFAULT_BATCH_CHARS} if batch_budget is None else batch_budget,
+        "batch_budget",
+    )
+    query_budget = validate_budget(
+        {"unit": "chars", "limit": DEFAULT_QUERY_CHARS} if query_budget is None else query_budget,
+        "query_budget",
+    )
     if min(max_passes, max_turns) < 1:
         raise ValueError("pass/turn limits must be >= 1")
     from ._agent import _AgentRunner
@@ -198,9 +207,9 @@ async def run_cases(
                     artifacts_field=artifacts_field,
                     metadata_field=metadata_field,
                     artifact_sort_field=artifact_sort_field,
-                    max_query_chars=max_query_chars,
+                    query_budget=query_budget,
                     final_output_type=output_type,
-                    max_batch_chars=max_batch_chars,
+                    batch_budget=batch_budget,
                 )
             except ArtifactTooLargeError as exc:
                 status, item = failure(exc, RetryDecision(False, "artifact_too_large"), "invalid_case")
@@ -222,7 +231,7 @@ async def run_cases(
                                 scheduler,
                                 max_passes=max_passes,
                                 max_turns=max_turns,
-                                max_batch_chars=max_batch_chars,
+                                batch_budget=batch_budget,
                                 attempt=attempts,
                             )
                         stage = "review"
@@ -341,11 +350,11 @@ async def _work(
     *,
     max_passes: int,
     max_turns: int,
-    max_batch_chars: int,
+    batch_budget: dict[str, Any],
     attempt: int,
 ) -> BaseModel:
     while progress.passes < max_passes:
-        batch = next_batch(context, progress.position, progress.offset, max_batch_chars)
+        batch = next_batch(context, progress.position, progress.offset, batch_budget)
         coverage = _coverage_payload(context, progress.position, progress.offset)
         prompt = _case_prompt(
             case_id=context.case_id,
@@ -354,7 +363,7 @@ async def _work(
             coverage=coverage,
             batch=batch.payload(),
             target_schema=context.final_output_type.model_json_schema(),
-            max_batch_chars=max_batch_chars,
+            batch_budget=batch_budget,
             pass_number=progress.passes + 1,
             validation_error=progress.validation_error,
         )

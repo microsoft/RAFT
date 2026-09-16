@@ -107,7 +107,7 @@ async def test_callback_selects_fresh_config_for_passes_review_and_retry(monkeyp
     result = await run_cases(
         cases=[case()], **options(
             run_config=aconfigure if asynchronous else configure,
-            worker_agent=worker, reviewer_agent=reviewer, max_batch_chars=31, retries=1,
+            worker_agent=worker, reviewer_agent=reviewer, batch_budget={"unit": "chars", "limit": 31}, retries=1,
         ),
     )
     assert not result["failed_cases"], result

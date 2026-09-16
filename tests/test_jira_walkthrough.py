@@ -35,7 +35,7 @@ def test_install_cell_uses_selected_kernel_without_installing_during_tests(cells
     exec(cells["install"], {})
     assert commands == [[
         sys.executable, "-m", "pip", "install", "--quiet", "-e",
-        str(ROOT), "python-dotenv", "ipywidgets",
+        str(ROOT), "python-dotenv", "ipywidgets", "tiktoken",
     ]]
 
 
@@ -47,14 +47,27 @@ def state(cells, monkeypatch, tmp_path):
     monkeypatch.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: False)
     ns = {}
     exec(cells["setup"], ns)
+    budget_settings = ast.Module(
+        body=[
+            node for node in ast.parse(cells["pipeline"]).body
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "context_budget"
+        ],
+        type_ignores=[],
+    )
+    exec(compile(budget_settings, "extraction-budget", "exec"), ns)
     retrieval_settings = ast.Module(
         body=[
             node for node in ast.parse(cells["retrieve"]).body
-            if isinstance(node, ast.Assign)
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id in {
-                "TOP_K", "MAX_CHARS", "RETRIEVAL_CONCURRENCY", "RETRIEVAL_RPM"
-            }
+            if isinstance(node, ast.Import) or (
+                isinstance(node, ast.Assign)
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in {
+                    "TOP_K", "RETRIEVAL_CONCURRENCY", "RETRIEVAL_RPM",
+                    "retrieval_encoding", "retrieval_budget",
+                }
+            )
         ],
         type_ignores=[],
     )
@@ -96,10 +109,10 @@ def state(cells, monkeypatch, tmp_path):
     return ns
 
 
-def test_ten_case_default_and_labels_never_reach_model_inputs(state):
-    assert state["CASE_LIMIT"] == 10
+def test_case_default_and_labels_never_reach_model_inputs(state):
+    assert state["CASE_LIMIT"] == 50
     assert len(state["cases"]) == 2
-    assert state["MAX_CHARS"] == 16_000
+    assert state["context_budget"] == {"unit": "chars", "limit": 256_000}
     first = state["cases"][0]
     assert first == {
         "id": "JIRA-1",
@@ -112,14 +125,14 @@ def test_ten_case_default_and_labels_never_reach_model_inputs(state):
 
 def test_explicit_small_run_does_not_change_held_out_query_set(state, cells):
     state["CASE_LIMIT"] = 1
-    exec(cells["data"].replace("CASE_LIMIT = 10", "CASE_LIMIT = 1"), state)
+    exec(cells["data"].replace("CASE_LIMIT = 50", "CASE_LIMIT = 1"), state)
     assert len(state["cases"]) == 1
     assert len(state["queries"]) == 2
 
 
 def test_full_corpus_option_keeps_every_case(state, cells):
     state["CASE_LIMIT"] = None
-    exec(cells["data"].replace("CASE_LIMIT = 10", "CASE_LIMIT = None"), state)
+    exec(cells["data"].replace("CASE_LIMIT = 50", "CASE_LIMIT = None"), state)
     assert len(state["cases"]) == len(state["corpus"])
 
 
@@ -143,7 +156,7 @@ async def test_final_cell_uses_valid_query_zero_and_exact_target_key(
         async def retrieve(self, queries, **options):
             assert queries == ["Initial symptoms only."]
             assert options["top_k"] == 5
-            assert options["max_chars"] == state["MAX_CHARS"]
+            assert options["context_budget"] is state["retrieval_budget"]
             assert options["concurrency"] == state["RETRIEVAL_CONCURRENCY"]
             assert options["rpm"] == state["RETRIEVAL_RPM"]
             assert "case_filter" not in options
@@ -162,7 +175,7 @@ async def test_final_cell_uses_valid_query_zero_and_exact_target_key(
     report = json.loads((state["OUTPUT_DIR"] / "case_hits.json").read_text())
     assert report["progress"] == 0
     assert report["indexed_cases"] == 2
-    assert report["max_chars"] == state["MAX_CHARS"]
+    assert report["context_budget"] == {"unit": "tokens", "limit": 5000}
     assert len(report["results"]) == 1
     assert report["results"][0]["hit"] is expected_hit
     assert closed == [True]
@@ -238,12 +251,13 @@ def test_notebook_has_no_legacy_synthetic_source_or_agent_directive_overrides(ce
 @pytest.mark.asyncio
 async def test_notebook_filter_demonstrates_custom_state_formatter_and_budget(state, cells):
     state["question"] = state["queries"][0]
-    state["MAX_CHARS"] = 1234
+    state["context_budget"] = {"unit": "chars", "limit": 1234}
 
     class Retriever:
         async def retrieve(self, queries, **options):
             assert queries == [state["question"]["query_0"]]
-            assert options["max_chars"] == 1234
+            assert options["context_budget"] is state["retrieval_budget"]
+            assert options["context_budget"]["limit"] == 5000
             assert options["top_k"] == state["TOP_K"]
             from pydantic import RootModel
 
@@ -260,17 +274,68 @@ async def test_notebook_filter_demonstrates_custom_state_formatter_and_budget(st
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("limit", [1234, None])
-async def test_main_retrieval_uses_configured_character_cap(state, cells, limit):
-    state["MAX_CHARS"] = limit
+async def test_main_retrieval_uses_independent_5000_token_budget(state, cells):
+    import tiktoken
+
+    encoding = tiktoken.get_encoding("o200k_base")
+    extraction_budget = state["context_budget"]
 
     class Retriever:
         async def retrieve(self, queries, **options):
-            assert options["max_chars"] == limit
+            budget = options["context_budget"]
+            assert budget is not extraction_budget
+            assert budget["unit"] == "tokens" and budget["limit"] == 5000
+            text = 'お誕生日おめでとう\n{"request_id": "abc-123"}'
+            assert budget["count_tokens"](text) == len(encoding.encode_ordinary(text))
             return {"results": [{"error": None, "candidates": [], "used_chars": 0}]}
 
     state["pipeline"] = Retriever()
-    await execute(cells["retrieve"].replace("MAX_CHARS = 16_000", f"MAX_CHARS = {limit}"), state)
+    await execute(cells["retrieve"], state)
+    assert state["context_budget"] is extraction_budget
+    assert extraction_budget == {"unit": "chars", "limit": 256_000}
+
+
+def test_extraction_cell_defines_budget_once_without_source_level_coupling(state, cells):
+    state.update(
+        worker=object(), reviewer=object(), client=object(),
+        OpenAIEmbeddings=lambda **kwargs: object(),
+        LocalPipeline=lambda output_dir, **kwargs: SimpleNamespace(**kwargs),
+    )
+    exec(cells["pipeline"], state)
+    assert state["extraction"]["batch_budget"] is state["context_budget"]
+    assert state["extraction"]["batch_budget"] is not state["retrieval_budget"]
+    assert state["extraction"]["query_budget"] is not state["context_budget"]
+    assert "context_budget" not in state["embedding"]
+    assert "o200k_base" in cells["pipeline"]
+    assert "count_tokens" in cells["pipeline"]
+    assert not any(
+        isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "context_budget"
+            for target in node.targets
+        )
+        for name in ("retrieve", "filter", "evaluate")
+        for node in ast.walk(ast.parse(cells[name]))
+    )
+
+
+async def test_evaluation_serializes_token_budget_without_callback(state, cells):
+    budget = state["retrieval_budget"]
+
+    class Retriever:
+        async def retrieve(self, queries, **options):
+            assert options["context_budget"] is budget
+            return {"results": [{"error": None, "candidates": []}]}
+
+    async def close():
+        pass
+
+    state.update(
+        reopened=Retriever(),
+        client=SimpleNamespace(close=close), display=lambda *args: None, stored_cases=[],
+    )
+    await execute(cells["evaluate"], state)
+    report = json.loads((state["OUTPUT_DIR"] / "case_hits.json").read_text())
+    assert report["context_budget"] == {"unit": "tokens", "limit": 5000}
 
 
 def test_settings_are_local_to_their_stage_not_shared_globals(cells):
@@ -281,7 +346,7 @@ def test_settings_are_local_to_their_stage_not_shared_globals(cells):
     }
     assert not setup_names & {
         "CASE_LIMIT", "MODEL", "EMBEDDING_MODEL", "CONCURRENCY", "RPM",
-        "TOP_K", "MAX_CHARS", "BUILD_GRAPH", "RUN_NAME", "OUTPUT_DIR",
+        "TOP_K", "context_budget", "retrieval_budget", "BUILD_GRAPH", "RUN_NAME", "OUTPUT_DIR",
     }
     configurations = {
         node.targets[0].id: node.value
@@ -294,6 +359,6 @@ def test_settings_are_local_to_their_stage_not_shared_globals(cells):
         assert isinstance(values["concurrency"], ast.Constant)
         assert isinstance(values["rpm"], ast.Constant)
     assert "BUILD_GRAPH = False" in cells["graph"]
-    assert "CASE_LIMIT = 10" in cells["data"]
+    assert "CASE_LIMIT = 50" in cells["data"]
     assert "worker_model =" in cells["agents"]
     assert "reviewer_model =" in cells["agents"]

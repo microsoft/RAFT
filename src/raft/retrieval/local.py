@@ -11,6 +11,7 @@ from typing import Any, Callable, Sequence
 from pydantic import BaseModel
 
 from raft._json import _id_key
+from raft._text_budget import validate_budget
 from raft.cases import ExtractedCase, load_cases, restore_case
 from raft.defaults import format_case as default_format_case
 from raft.embedding import BM25Index, EmbeddingBackend
@@ -119,7 +120,7 @@ class LocalRetriever:
                 eligible.extend(positions)
         return eligible
 
-    def _rank(self, query, vector, eligible, top_k, rrf_constant, max_chars, format_case):
+    def _rank(self, query, vector, eligible, top_k, rrf_constant, context_budget, format_case):
         query_vector = normalize([vector])[0]
         if query_vector.shape[0] != self.vectors.shape[1]:
             raise ValueError("Query dimensions must match stored vectors")
@@ -127,7 +128,7 @@ class LocalRetriever:
         hits = rank_cases(
             self.rows, self.vectors, query_vector, eligible, self.cases, lexical, rrf_constant
         )
-        return cap_cases(hits[:top_k], max_chars, format_case)
+        return cap_cases(hits[:top_k], context_budget, format_case)
 
     async def retrieve(
         self,
@@ -136,7 +137,7 @@ class LocalRetriever:
         backend: EmbeddingBackend,
         top_k: int = 5,
         case_filter: CaseFilter | None = None,
-        max_chars: int | None = None,
+        context_budget: dict[str, Any] | None = None,
         format_case: CaseFormatter = default_format_case,
         rrf_constant: int = 60,
         batch_size: int = 64,
@@ -165,10 +166,15 @@ class LocalRetriever:
         The formatter sees at most top_k distinct cases in ranking order.
 
         formatted_context joins selected case strings with two newlines.
-        max_chars caps its exact character length, including separators; used_chars
-        equals len(formatted_context). Stop before the first case that would exceed
-        the budget, without truncating a case or trying smaller lower-ranked cases.
-        truncated reports removal by the character budget, not the top_k limit.
+        context_budget is {"unit": "chars" | "tokens", "limit": nonnegative int}.
+        Token mode requires count_tokens: a synchronous, deterministic str -> int
+        callback for the downstream model, returning a nonnegative integer.
+        Character mode forbids count_tokens; None means no budget. The budget
+        counts the joined context including separators, not separate case counts.
+        used_chars always equals len(formatted_context). Stop before the first case
+        that would exceed the budget, without truncating a case or trying smaller
+        lower-ranked cases.
+        truncated reports removal by the context budget, not the top_k limit.
         Empty results and failed queries have formatted_context="" and used_chars=0.
 
         CPU work runs in worker threads; callbacks must be pure/thread-safe.
@@ -184,8 +190,8 @@ class LocalRetriever:
         for name, value in (("top_k", top_k), ("rrf_constant", rrf_constant)):
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        if max_chars is not None and (type(max_chars) is not int or max_chars < 0):
-            raise ValueError("max_chars must be nonnegative or None")
+        if context_budget is not None:
+            context_budget = validate_budget(context_budget, "context_budget", allow_zero=True)
         if case_filter is not None and not callable(case_filter):
             raise ValueError("case_filter must be callable or None")
         if (
@@ -281,7 +287,7 @@ class LocalRetriever:
                             eligible,
                             top_k,
                             rrf_constant,
-                            max_chars,
+                            context_budget,
                             format_case,
                         )
                         result.update(

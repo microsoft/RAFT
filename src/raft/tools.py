@@ -25,7 +25,9 @@ async def query_case_sql(
       List revision IDs first, then select specific JSON fields or edits as needed.
       stage is worker/reviewer; reviewer pass_number is NULL. Failed drafts are absent.
 
-    Use SQLite JSON functions such as json_extract to inspect JSON columns. Results must fit max_query_chars as a complete serialized JSON response.
+    Use SQLite JSON functions such as json_extract to inspect JSON columns.
+    Results must fit query_budget as a complete serialized JSON response,
+    measured in its configured characters or tokens.
     On query_result_too_large, select fewer columns, filter or paginate with
     ORDER BY and LIMIT/OFFSET, or use substr() for large fields (1-based offsets).
     No partial results or shortened fields are returned.

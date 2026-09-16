@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import inspect
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
 from raft._json import _id_key
+from raft._text_budget import measure_text
 
 from .types import CaseFormatter, RetrievalHit
 
@@ -67,7 +68,7 @@ def rank_cases(
 
 
 def cap_cases(
-    hits: Sequence[RetrievalHit], max_chars: int | None, format_case: CaseFormatter
+    hits: Sequence[RetrievalHit], context_budget: dict[str, Any] | None, format_case: CaseFormatter
 ) -> tuple[list[RetrievalHit], str, bool]:
     """Format a ranked prefix once, counting the exact text plus blank-line separators."""
     selected: list[RetrievalHit] = []
@@ -80,8 +81,13 @@ def cap_cases(
                 text.close()
             raise TypeError("format_case must return a string synchronously")
         size = len(text) + (2 if parts else 0)
-        if max_chars is not None and used + size > max_chars:
-            break
+        if context_budget is not None:
+            measured = (
+                used + size if context_budget["unit"] == "chars"
+                else measure_text("\n\n".join([*parts, text]), context_budget)
+            )
+            if measured > context_budget["limit"]:
+                break
         selected.append(hit)
         parts.append(text)
         used += size

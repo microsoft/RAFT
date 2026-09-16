@@ -29,7 +29,7 @@ async def test_complete_review_and_filter_preserve_fields(monkeypatch, keep):
     async def run(agent, prompt, *, context, **kwargs):
         if agent is reviewer:
             payload = json.loads(prompt.split("Review context:\n")[1])
-            assert "max_query_chars" not in payload
+            assert "query_budget" not in payload
             assert payload["output"]["timeline"] == passes
             assert len(passes) > 1
             assert context.query("select count(*) as n from artifacts")["rows"] == [{"n": 2}]
@@ -64,7 +64,7 @@ async def test_complete_review_and_filter_preserve_fields(monkeypatch, keep):
     monkeypatch.setattr(sdk.Runner, "run", run)
     result = await run_cases(
         cases=[case(text="x" * 140)],
-        **options(reviewer_agent=reviewer, should_keep=should_keep, max_batch_chars=170),
+        **options(reviewer_agent=reviewer, should_keep=should_keep, batch_budget={"unit": "chars", "limit": 170}),
     )
     record = result["extracted_cases" if keep else "filtered_cases"][0]
     assert seen == [record]
@@ -200,7 +200,7 @@ async def test_handoff_notes_carried_between_worker_passes(monkeypatch):
 
     monkeypatch.setattr(sdk.Runner, "run", run)
     result = await run_cases(
-        cases=[case(text="x" * 140)], **options(output_type=CaseExtraction, max_batch_chars=170)
+        cases=[case(text="x" * 140)], **options(output_type=CaseExtraction, batch_budget={"unit": "chars", "limit": 170})
     )
     assert len(seen) > 1
     assert result["extracted_cases"][0].output.handoff_notes == seen

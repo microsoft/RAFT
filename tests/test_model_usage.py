@@ -41,7 +41,7 @@ async def test_five_passes_and_review_aggregate_only_by_model(tmp_path):
     result = await run_cases(**execution_options(
         ScriptedModel([]),
         cases=[{"id": "case", "meta": {}, "items": [{"text": str(i)} for i in range(5)]}],
-        max_batch_chars=13, run_config=lambda *_: RunConfig(model=next(selections), tracing_disabled=True),
+        batch_budget={"unit": "chars", "limit": 13}, run_config=lambda *_: RunConfig(model=next(selections), tracing_disabled=True),
         should_keep=lambda c: c.review.keep,
     ))
     assert not result["failed_cases"], result

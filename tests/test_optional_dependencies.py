@@ -23,6 +23,8 @@ def test_dependencies_include_openai_agents_and_optional_integrations():
     } == extras.keys()
     assert any(dep.startswith("azure-identity") for dep in extras["azure"])
     assert not any(dep.startswith("azure-identity") for dep in dependencies)
+    assert not any(dep.startswith("tiktoken") for dep in dependencies)
+    assert any(dep.startswith("tiktoken") for dep in extras["dev"])
     assert config["project"]["name"] == "raft"
 
 
@@ -50,7 +52,7 @@ import importlib
 import importlib.abc
 import sys
 
-roots = {"voyageai", "openai", "agents", "langgraph", "langchain_core", "claude_agent_sdk",
+roots = {"tiktoken", "voyageai", "openai", "agents", "langgraph", "langchain_core", "claude_agent_sdk",
          "agent_framework", "google.adk", "google.genai", "crewai"}
 blocked = roots - set(sys.argv[2:])
 

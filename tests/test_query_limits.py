@@ -14,7 +14,7 @@ def case_context(limit):
     context = _build_case_context(
         {"id": "case", "meta": {}, "items": [{"text": "abcdefghij"}]},
         id_field="id", metadata_field="meta", artifacts_field="items",
-        artifact_sort_field=None, max_query_chars=limit,
+        artifact_sort_field=None, query_budget={"unit": "chars", "limit": limit},
     )
     try:
         yield context
@@ -65,7 +65,7 @@ def test_oversized_result_has_no_partial_rows_and_pagination_recovers():
     with case_context(response_size(["n"], [{"n": 1}])) as context:
         query = "WITH t(n) AS (VALUES (1),(2),(3)) SELECT n FROM t ORDER BY n"
         result = context.query(query)
-        assert set(result) == {"error", "max_query_chars", "suggestion"}
+        assert set(result) == {"error", "query_budget", "suggestion"}
         assert result["error"] == "query_result_too_large"
         for offset in range(3):
             result = context.query(query + f" LIMIT 1 OFFSET {offset}")
@@ -93,7 +93,7 @@ def test_tiny_limit_returns_actionable_error_and_closes_cursor():
         assert len(json.dumps(result)) > 1  # Errors are exempt.
         assert "error" in context.query("SELECT nonexistent FROM artifacts")
         assert "error" in context.query("DELETE FROM artifacts")
-        context.max_query_chars = 100
+        context.query_budget = {"unit": "chars", "limit": 100}
         assert context.query("SELECT 1 AS n")["rows"] == [{"n": 1}]
 
 
@@ -101,9 +101,9 @@ def test_tiny_limit_returns_actionable_error_and_closes_cursor():
 async def test_invalid_query_limit_rejected_before_agent_preparation(limit):
     from pydantic import BaseModel
 
-    with pytest.raises(ValueError, match="max_query_chars must be a positive integer"):
+    with pytest.raises(ValueError, match="query_budget.limit must be a positive integer"):
         await run_cases(
             cases=[], worker_agent=None, reviewer_agent=None, output_type=BaseModel,
             id_field="id", artifacts_field="items", metadata_field="meta",
-            max_query_chars=limit,
+            query_budget={"unit": "chars", "limit": limit},
         )

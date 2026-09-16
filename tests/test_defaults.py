@@ -445,8 +445,8 @@ async def test_defaults_complete_worker_passes_then_review_without_losing_state(
         reviewer_agent=reviewer,
         output_type=CaseExtraction,
         should_keep=should_keep,
-        max_batch_chars=max(len(json.dumps(a)) for a in artifacts),
-        max_query_chars=500,
+        batch_budget={"unit": "chars", "limit": max(len(json.dumps(a)) for a in artifacts)},
+        query_budget={"unit": "chars", "limit": 500},
         rpm=1000,
         retries=0,
     )
