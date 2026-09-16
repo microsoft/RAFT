@@ -16,7 +16,7 @@ As a new case evolves from symptoms to diagnosis, your agent can retrieve past
 cases that match its **current understanding**, along with the evidence and
 resolution path that followed.
 
-[Overview](#overview) · [Agent workflow](#agent-workflow) · [Quickstart](#quickstart) · [Citation](#paper-and-citation)
+[Overview](#overview) · [Agent workflow](#agent-workflow) · [Quickstart](#quickstart) · [Production usage](#production-usage) · [Citation](#paper-and-citation)
 
 ## Overview
 
@@ -89,17 +89,14 @@ For other models, providers, and authentication options, see the OpenAI Agents S
 ### 3. Run the walkthrough
 
 ```bash
-python -m jupyterlab examples/notebooks/local_pipeline_walkthrough.ipynb
+python -m jupyterlab examples/jira_walkthrough.ipynb
 ```
 
-The [walkthrough](examples/notebooks/local_pipeline_walkthrough.ipynb) includes
-100 small synthetic support cases and covers extraction, indexing, retrieval,
-incremental updates, and optional graph expansion. Set `CASE_LIMIT=5` for a smaller
-first run.
-
-Prefer a script? [examples/pipeline.py](examples/pipeline.py) demonstrates the
-end-to-end pipeline with an additional tool and Voyage embeddings; it requires
-`.[dev,voyage]` plus `OPENAI_API_KEY` and `VOYAGE_API_KEY`.
+The [walkthrough](examples/jira_walkthrough.ipynb) uses the
+[Apache Jira benchmark](datasets/Apache_Jira/README.md): 600 historical issues and
+30 held-out reports. It covers extraction, BM25/vector retrieval, 0%-progress case-hit evaluation,
+optional graph expansion, and reopening an index, with short customization notes.
+The notebook starts with 10 cases; set `CASE_LIMIT=None` for the full corpus.
 
 ### 4. Retrieve from your agent
 
@@ -125,11 +122,44 @@ for result in results["results"]:
 case content per query, including metadata and execution history; it is a character
 budget, **not a token limit**. Metadata filters and graph expansion are opt-in.
 
+## Production usage
+
+RAFT's **extraction and embedding stages** are reusable building blocks for production
+pipelines: bounded batches, configurable concurrency/retries, and per-case failure
+reporting. They return results in memory without saving them. `LocalPipeline` is
+provided for quick local experiments—not as a production search service.
+
+For production, process cases incrementally and persist results in a service such as
+<a href="https://learn.microsoft.com/en-us/azure/search/vector-search-overview"><img src="assets/azure-ai-search.svg" width="28" height="28" alt="Azure AI Search icon" /></a>
+**[Azure AI Search](https://learn.microsoft.com/en-us/azure/search/vector-search-overview)**,
+which supports vector and hybrid retrieval. There is no need to load or reindex
+your entire case collection at once.
+
+```python
+# Pseudocode: configure agents/models once; source, storage, and retry queue are yours.
+from raft import run_cases, embed_cases
+
+async for batch in case_source.batches(size=100):
+    extracted = await run_cases(cases=batch, **extraction_options)
+    embedded = await embed_cases(
+        cases=extracted["extracted_cases"], **embedding_options
+    )
+    await production_index.upsert(embedded["embedded_cases"])
+    await retry_queue.enqueue(
+        extracted["failed_cases"] + embedded["failed_cases"]
+    )
+```
+
+Your storage adapter maps case records and entry text/vectors to the service schema,
+preserving `case_id` and `item_index` so search hits can return the parent case and
+matched state. Durable retries, access control, and deployment monitoring belong
+to your application; RAFT does not include an Azure AI Search connector.
+
 ## Explore the code
 
 | Start here | What it contains |
 |---|---|
-| [Examples](examples/) | Runnable pipelines, saved-index helpers, and the walkthrough |
+| [Jira walkthrough](examples/jira_walkthrough.ipynb) | End-to-end notebook with customization notes |
 | [Defaults](src/raft/defaults/) | Extraction/review schemas, prompts, and text preparation |
 | [Extraction](src/raft/extraction/) | Worker passes, evidence access, state edits, and review |
 | [LocalPipeline](src/raft/pipeline.py) | Persistent indexing, reopening, and incremental updates |
@@ -163,3 +193,4 @@ preprint is available.
 Released under the [MIT License](LICENSE). Contributions are welcome; please follow
 the [Microsoft Open Source Code of Conduct](CODE_OF_CONDUCT.md). Report security
 issues through the process in [SECURITY.md](SECURITY.md), not a public issue.
+The Azure service icon is used under [Microsoft's icon terms](https://learn.microsoft.com/en-us/azure/architecture/icons/#icon-terms).
