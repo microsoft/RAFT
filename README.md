@@ -128,6 +128,12 @@ They support bounded batches, configurable concurrency/retries, and per-case fai
 returning results in memory without saving them. `LocalPipeline` is for quick local
 experiments.
 
+Equip both the worker and reviewer with tools for consulting internal documentation
+and error catalogs. Tailor the `entities` field in the
+[default output model](src/raft/defaults/extraction.py) to your domain's identifiers
+and attributes to support precise case filtering and targeted searches across your
+knowledge base.
+
 Process cases incrementally and store/search the results in a service such as
 **[Microsoft Azure AI Search](https://learn.microsoft.com/en-us/azure/search/)**,
 which supports vector and hybrid retrieval.
