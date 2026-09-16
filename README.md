@@ -30,15 +30,14 @@ rather than scattered across disconnected chunks.
 
 [![RAFT architecture: offline case indexing and online state-aware retrieval, with optional case-graph expansion.](assets/raft-overview.png)](assets/raft-overview.png)
 
-*Architecture from the paper. The re-query loop belongs to your troubleshooting
-agent; RAFT supplies retrieval, not an autonomous resolution agent.*
+*Your troubleshooting agent re-queries RAFT as the active case evolves.*
 
 1. **Distill the case.** Turn dialogue, logs, and notes into a chronological
    timeline of meaningful changes: symptoms, hypotheses, findings, and resolution.
 2. **Match the state.** Embed each timeline entry independently and combine vector
    similarity with BM25 through reciprocal rank fusion.
-3. **Return the trajectory.** Promote entry matches to distinct parent cases,
-   returning the full extracted case and the timeline entry that triggered the match.
+3. **Return the trajectory.** Return distinct cases with their full investigation
+   history and the timeline entry that triggered each match.
 
 An **optional case-level graph** connects cases through a configurable view, such
 as root cause and resolution, for expansion beyond the initial matches.
@@ -48,7 +47,7 @@ as root cause and resolution, for expansion beyond the initial matches.
 [![Worker-reviewer extraction: bounded artifact batches update an evolving case state; both agents query source evidence, and the reviewer can inspect revision history.](assets/agent-workflow.png)](assets/agent-workflow.png)
 
 RAFT uses the **[OpenAI Agents SDK](https://github.com/openai/openai-agents-python)**
-as its agent SDK backend, powering the **worker + final reviewer** workflow:
+as its agent backend for a **worker + final reviewer** workflow:
 
 - **Worker passes** process ordered, whole-artifact batches and refine shared state
   through JSON Patch. State and handoff notes carry forward, rather than the entire
@@ -58,14 +57,9 @@ as its agent SDK backend, powering the **worker + final reviewer** workflow:
 - **Final review** checks the completed extraction against evidence and revision
   history, corrects the state, and returns a separate assessment before optional filtering.
 
-The default output preserves **entities, timeline narratives, confirmed root cause,
-and resolution steps**. Unknown conclusions remain `null`; filtered cases retain
-their extracted evidence for inspection. Prompts, Pydantic models, embedding text,
-and model clients are all replaceable without editing the pipeline.
-
-Start with our [default worker and reviewer prompts](src/raft/defaults/prompts.py),
-then modify or replace them for your domain. See the
-[example notebook](examples/jira_walkthrough.ipynb) for customization details.
+Adapt the [default prompts](src/raft/defaults/prompts.py), Pydantic models,
+embedding text, and model clients to your domain without changing the pipeline.
+The [example notebook](examples/jira_walkthrough.ipynb) shows how.
 
 ## Quickstart
 
@@ -107,50 +101,31 @@ Query a configured and indexed `LocalPipeline`:
 results = await pipeline.retrieve(
     ["SSO login fails after certificate rotation."],
     top_k=5,
+    max_chars=16_000,
 )
 
 for result in results["results"]:
     if result["error"]:
         raise RuntimeError(result["error"])
-    print(result["formatted_context"])  # Ready-to-use, budgeted context.
-    for hit in result["candidates"]:
-        case = hit["case"]
-        matched_entry = case.output.timeline[hit["item_index"]]
-        print(case.id, matched_entry.narrative)
+    print(result["formatted_context"])
 ```
 
-`top_k` caps distinct cases **per query**. `max_chars` caps the exact returned
-`formatted_context`, including blank-line separators. The default formatter emits
-only **`id`, `metadata`, `output` (extracted state), and `item_index`**—not review
-diagnostics or execution history. Cases that would exceed the budget are not added.
-
-Customize the text with `format_case(hit) -> str`. The hit contains the full
-`hit["case"]` object, `id`, `entry_id`, scores, and zero-based `item_index` (the
-matched position in the embedding text list). For state-only context:
-
-```python
-results = await pipeline.retrieve(
-    queries, top_k=5, max_chars=16_000,
-    format_case=lambda hit: hit["case"].output.model_dump_json(),
-)
-```
-
-Formatters are synchronous and should not mutate the hit. `used_chars` equals
-`len(formatted_context)`; this is a character budget, **not a token limit**.
-Structured candidates still contain the full case. Metadata filters and graph
-expansion are opt-in.
+`top_k` limits distinct cases per query; `max_chars` limits the returned context
+in **characters, not tokens**. Structured matches remain available in `candidates`.
+Supply `format_case(hit) -> str` to customize the text using the full case and
+matched entry index. See the [notebook](examples/jira_walkthrough.ipynb) for
+formatting, filtering, and optional graph expansion.
 
 ## Production usage
 
-RAFT's **extraction and embedding stages** are reusable building blocks for production
-pipelines: bounded batches, configurable concurrency/retries, and per-case failure
-reporting. They return results in memory without saving them. `LocalPipeline` is
-provided for quick local experiments—not as a production search service.
+Use RAFT's standalone **extraction and embedding stages** in production pipelines.
+They support bounded batches, configurable concurrency/retries, and per-case failures,
+returning results in memory without saving them. `LocalPipeline` is for quick local
+experiments.
 
-For production, process cases incrementally and persist results in a service such as
+Process cases incrementally and store/search the results in a service such as
 **[Microsoft Azure AI Search](https://learn.microsoft.com/en-us/azure/search/)**,
-which supports vector and hybrid retrieval. There is no need to load or reindex
-your entire case collection at once.
+which supports vector and hybrid retrieval—without loading the entire corpus at once.
 
 ```python
 # Pseudocode: configure agents/models once; source, storage, and retry queue are yours.
@@ -167,10 +142,8 @@ async for batch in case_source.batches(size=100):
     )
 ```
 
-Your storage adapter maps case records and entry text/vectors to the service schema,
-preserving `case_id` and `item_index` so search hits can return the parent case and
-matched state. Durable retries, access control, and deployment monitoring belong
-to your application; RAFT does not include an Azure AI Search connector.
+Provide your own storage/search adapter, preserving `case_id` and `item_index`
+to return the parent case and matched state. An Azure AI Search connector is not bundled.
 
 ## Explore the code
 
@@ -190,8 +163,7 @@ to your application; RAFT does not include an Azure AI Search connector.
 Mingxuan Zhang, Xiaowen Wang, Anupma Sharan, Zhengyi Chen, Chenyu Diana Zhang,
 Shanshan Yang, and Chittibabu Pacharu. Microsoft.
 
-**arXiv: coming soon.** The paper link and final citation will be added when the
-preprint is available.
+**arXiv preprint: coming soon.**
 
 <!-- Replace the placeholder with the arXiv URL and final bibliographic metadata after upload. -->
 
