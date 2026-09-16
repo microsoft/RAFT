@@ -98,13 +98,6 @@ The [walkthrough](examples/jira_walkthrough.ipynb) uses the
 optional graph expansion, and reopening an index, with short customization notes.
 The notebook starts with 10 cases; set `CASE_LIMIT=None` for the full corpus.
 
-With `show_progress=True`, bars show scheduled retries, transient rate-limit events,
-and attempts currently waiting in backoff. These count RAFT-level retries, not retries
-inside a provider client. Set `suppress_response_errors=True` in extraction options
-to quiet repeated SDK response-error logs for that run (the notebook does this).
-Final failures retain exception details and available HTTP status, provider code,
-request ID, and retry delay; inspect `failed_cases` without enabling verbose logging.
-
 ### 4. Retrieve from your agent
 
 Once you have a configured and indexed `LocalPipeline`, your agent can query it
