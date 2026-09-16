@@ -6,6 +6,7 @@ import pytest
 from pydantic import BaseModel, TypeAdapter
 
 from raft import ExtractedCase, LocalRetriever
+from raft.defaults import format_case
 from raft.embedding import BM25Index, EmbeddingBatch
 from raft.runtime import RetryDecision
 from raft.storage import save_json, save_jsonl
@@ -190,16 +191,255 @@ async def test_query_batch_order_duplicates_empty_batch_and_empty_index():
 async def test_char_budget_is_strict_whole_case_ranked_prefix():
     cases, rows = fixture()
     retriever = LocalRetriever(cases=cases, embeddings=rows)
-    size = len(cases[0].model_dump_json())
+    unlimited = (await search(retriever))[0]
+    size = len(format_case(unlimited["candidates"][0]))
     result = (await search(retriever, max_chars=size, top_k=3))[0]
     assert [hit["id"] for hit in result["candidates"]] == ["a"]
     assert result["used_chars"] == size and result["truncated"]
+    assert result["formatted_context"] == format_case(result["candidates"][0])
     result = (await search(retriever, max_chars=size - 1))[0]
     assert result["candidates"] == [] and result["truncated"]
     assert result["used_chars"] == 0
-    unlimited = (await search(retriever))[0]
+    assert result["formatted_context"] == ""
     assert not unlimited["truncated"]
-    assert unlimited["used_chars"] == sum(len(c.model_dump_json()) for c in cases)
+    assert unlimited["formatted_context"] == "\n\n".join(
+        format_case(hit) for hit in unlimited["candidates"]
+    )
+    assert unlimited["used_chars"] == len(unlimited["formatted_context"])
+
+
+@pytest.mark.asyncio
+async def test_default_context_contains_state_and_anchor_but_no_diagnostics():
+    cases, rows = fixture()
+    cases[0].execution = {"private_debug": "history" * 10_000}
+    cases[0].review = {"private_review": "not retrieval evidence"}
+    original = cases[0].model_dump()
+    result = (await search(LocalRetriever(cases=cases, embeddings=rows), top_k=1))[0]
+    expected = {
+        "id": "a", "metadata": cases[0].metadata, "output": cases[0].output.model_dump(),
+        "item_index": 1,
+    }
+    assert json.loads(result["formatted_context"]) == expected
+    assert result["used_chars"] < len(cases[0].model_dump_json())
+    assert "private_debug" not in result["formatted_context"]
+    assert "private_review" not in result["formatted_context"]
+    assert result["candidates"][0]["case"] is cases[0]
+    assert cases[0].model_dump() == original
+    budgeted = (await search(
+        LocalRetriever(cases=cases, embeddings=rows),
+        max_chars=result["used_chars"], top_k=1,
+    ))[0]
+    assert budgeted["formatted_context"] == result["formatted_context"]
+    assert len(budgeted["candidates"]) == 1
+    assert not budgeted["truncated"]
+
+
+@pytest.mark.asyncio
+async def test_default_matched_index_is_query_specific_for_the_same_parent_case():
+    cases, rows = fixture()
+    results = await search(
+        LocalRetriever(cases=cases, embeddings=rows), ["query", "vertical"], top_k=1,
+        case_filter=lambda query, case: case.id == "a",
+    )
+    assert [r["candidates"][0]["id"] for r in results] == ["a", "a"]
+    assert [json.loads(r["formatted_context"])["item_index"] for r in results] == [1, 0]
+    assert [r["candidates"][0]["entry_id"] for r in results] == ["a-1", "a-0"]
+
+
+@pytest.mark.asyncio
+async def test_custom_formatter_receives_full_hit_and_runs_in_worker_thread():
+    cases, rows = fixture()
+    cases[0].review = {"keep": True}
+    seen = []
+    main_thread = threading.get_ident()
+
+    def formatter(hit):
+        seen.append((hit, threading.get_ident()))
+        assert hit["case"].execution is cases[0].execution
+        assert hit["case"].review == {"keep": True}
+        return f"{hit['id']}:{hit['item_index']}:{hit['entry_id']}"
+
+    result = (await search(
+        LocalRetriever(cases=cases, embeddings=rows), top_k=1, format_case=formatter,
+    ))[0]
+    assert result["formatted_context"] == "a:1:a-1"
+    assert result["used_chars"] == 7
+    assert len(seen) == 1
+    hit, thread = seen[0]
+    assert thread != main_thread
+    assert hit is result["candidates"][0]
+    assert set(hit) == {
+        "id", "case", "item_index", "entry_id", "score",
+        "cosine_similarity", "bm25_score", "source",
+    }
+    assert hit["score"] == hit["cosine_similarity"] == 1.0
+    assert hit["bm25_score"] is None and hit["source"] == "direct"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit,ids,text,truncated", [
+    (None, ["a", "b", "c"], "aaa\n\nbb\n\nc", False),
+    (0, [], "", True),
+    (2, [], "", True),
+    (3, ["a"], "aaa", True),
+    (6, ["a"], "aaa", True),
+    (7, ["a", "b"], "aaa\n\nbb", True),
+    (9, ["a", "b"], "aaa\n\nbb", True),
+    (10, ["a", "b", "c"], "aaa\n\nbb\n\nc", False),
+])
+async def test_formatted_budget_counts_exact_text_and_separators(limit, ids, text, truncated):
+    cases, rows = fixture()
+    result = (await search(
+        LocalRetriever(cases=cases, embeddings=rows), top_k=3, max_chars=limit,
+        format_case=lambda hit: {"a": "aaa", "b": "bb", "c": "c"}[hit["id"]],
+    ))[0]
+    assert [hit["id"] for hit in result["candidates"]] == ids
+    assert result["formatted_context"] == text
+    assert result["used_chars"] == len(text)
+    assert result["truncated"] is truncated
+    assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_budget_stops_at_first_oversize_case_and_formats_no_lower_candidates():
+    cases, rows = fixture()
+    seen = []
+
+    def formatter(hit):
+        seen.append(hit["id"])
+        return {"a": "aaa", "b": "too long", "c": "c"}[hit["id"]]
+
+    result = (await search(
+        LocalRetriever(cases=cases, embeddings=rows), max_chars=6, format_case=formatter,
+    ))[0]
+    assert seen == ["a", "b"]
+    assert [hit["id"] for hit in result["candidates"]] == ["a"]
+    assert result["formatted_context"] == "aaa"
+    # A smaller third case would fit, but ranked-prefix semantics must not skip the second.
+    assert len("aaa\n\nc") == 6
+
+
+@pytest.mark.asyncio
+async def test_unicode_budget_is_character_length_not_bytes_and_applies_per_query():
+    cases, rows = fixture()
+    text = "café \U0001f600"
+    results = await search(
+        LocalRetriever(cases=cases, embeddings=rows), ["query", "vertical"], top_k=1,
+        max_chars=len(text), format_case=lambda hit: text,
+    )
+    assert len(text.encode("utf-8")) > len(text)
+    assert [r["candidates"][0]["id"] for r in results] == ["a", "b"]
+    assert all(r["used_chars"] == len(text) and r["formatted_context"] == text for r in results)
+    assert all(not r["truncated"] for r in results)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [None, 3, ["text"], {"text": "bad"}, b"bytes"])
+async def test_invalid_formatter_output_is_a_query_error_without_partial_context(value):
+    cases, rows = fixture()
+
+    def formatter(hit):
+        return "valid first case" if hit["id"] == "a" else value
+
+    result = (await search(
+        LocalRetriever(cases=cases, embeddings=rows), format_case=formatter,
+    ))[0]
+    assert result["error"]["type"] == "TypeError"
+    assert "format_case" in result["error"]["message"]
+    assert result["candidates"] == []
+    assert result["formatted_context"] == "" and result["used_chars"] == 0
+
+
+@pytest.mark.asyncio
+async def test_formatter_failures_are_isolated_and_do_not_repeat_embeddings(monkeypatch):
+    cases, rows = fixture()
+    seen = []
+
+    def formatter(hit):
+        seen.append(hit["id"])
+        if hit["id"] == "b":
+            raise ValueError("formatter rejected case b")
+        if len(seen) == 1:
+            raise TimeoutError("temporary formatter failure")
+        return hit["id"]
+
+    monkeypatch.setattr("raft.retrieval.local._retry_delay", lambda *args: 0)
+    backend = Backend()
+    results = await search(
+        LocalRetriever(cases=cases, embeddings=rows), ["query", "vertical"],
+        backend=backend, top_k=1, format_case=formatter, concurrency=1,
+    )
+    assert backend.calls == [["query"], ["vertical"]]
+    assert results[0]["formatted_context"] == "a" and results[0]["attempts"] == 2
+    assert results[1]["error"]["message"] == "formatter rejected case b"
+    assert results[1]["formatted_context"] == "" and results[1]["candidates"] == []
+
+
+@pytest.mark.asyncio
+async def test_async_and_noncallable_formatters_fail_before_api_calls():
+    async def async_formatter(hit):
+        return "text"
+
+    async def async_generator(hit):
+        yield "text"
+
+    class AsyncFormatter:
+        async def __call__(self, hit):
+            return "text"
+
+    cases, rows = fixture()
+    backend = Backend()
+    for formatter in (None, "not callable", 1, async_formatter, async_generator, AsyncFormatter()):
+        with pytest.raises(ValueError, match="synchronous callable"):
+            await search(
+                LocalRetriever(cases=cases, embeddings=rows),
+                backend=backend, format_case=formatter,
+            )
+    assert not backend.calls
+
+
+@pytest.mark.asyncio
+async def test_hidden_coroutine_return_is_rejected_without_unawaited_coroutine():
+    async def make_text():
+        return "text"
+
+    cases, rows = fixture()
+    result = (await search(
+        LocalRetriever(cases=cases, embeddings=rows), format_case=lambda hit: make_text(),
+    ))[0]
+    assert result["error"]["type"] == "TypeError"
+    assert result["formatted_context"] == ""
+
+
+@pytest.mark.asyncio
+async def test_empty_index_and_filtered_results_have_empty_context_without_formatting():
+    def formatter(hit):
+        pytest.fail("There are no hits to format")
+
+    cases, rows = fixture()
+    for retriever in (
+        LocalRetriever(cases=[], embeddings=[]),
+        LocalRetriever(cases=cases, embeddings=rows),
+    ):
+        result = (await search(
+            retriever, case_filter=lambda query, case: False, format_case=formatter,
+        ))[0]
+        assert result["formatted_context"] == ""
+        assert result["used_chars"] == 0 and not result["truncated"]
+        assert result["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_output_only_custom_formatter_and_empty_string_are_preserved():
+    cases, rows = fixture()
+    retriever = LocalRetriever(cases=cases, embeddings=rows)
+    result = (await search(
+        retriever, top_k=1, format_case=lambda hit: hit["case"].output.model_dump_json(),
+    ))[0]
+    assert json.loads(result["formatted_context"]) == cases[0].output.model_dump()
+    result = (await search(retriever, top_k=1, max_chars=0, format_case=lambda hit: ""))[0]
+    assert len(result["candidates"]) == 1 and not result["truncated"]
+    assert result["formatted_context"] == "" and result["used_chars"] == 0
 
 
 @pytest.mark.asyncio

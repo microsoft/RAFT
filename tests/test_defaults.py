@@ -67,6 +67,7 @@ def test_default_exports():
         "REVIEWER_INSTRUCTIONS",
         "state_to_text",
         "case_to_text",
+        "format_case",
     }
     from raft.defaults import extraction as models
     from raft.defaults import prompts, text
@@ -77,6 +78,33 @@ def test_default_exports():
     assert defaults.REVIEWER_INSTRUCTIONS is prompts.REVIEWER_INSTRUCTIONS
     assert defaults.state_to_text is text.state_to_text
     assert defaults.case_to_text is text.case_to_text
+    assert defaults.format_case is text.format_case
+
+
+def test_default_retrieval_formatter_supports_arbitrary_root_state_and_json_metadata():
+    from datetime import datetime, timezone
+
+    from pydantic import RootModel
+
+    from raft import ExtractedCase
+
+    case = ExtractedCase(
+        id=123,
+        metadata={"created": datetime(2026, 1, 1, tzinfo=timezone.utc)},
+        output=RootModel[list[str]](["initial observation", "later finding"]),
+        review={"assessment": "private"},
+        execution={"usage": {"requests": 10}},
+    )
+    hit = {
+        "id": case.id, "case": case, "item_index": 1, "entry_id": "entry-1",
+        "score": 1.0, "cosine_similarity": 1.0, "bm25_score": None, "source": "direct",
+    }
+    assert json.loads(defaults.format_case(hit)) == {
+        "id": 123,
+        "metadata": {"created": "2026-01-01T00:00:00Z"},
+        "output": ["initial observation", "later finding"],
+        "item_index": 1,
+    }
 
 
 def test_schema_preserves_legacy_v4_fields_without_delta_protocol():

@@ -371,6 +371,8 @@ class LocalPipeline:
         rebuilt locally. Graph expansion is a separate graph_expansion() call.
         Returns results in query order plus embedding_usage and embedding_requests
         for this operation. batch_size controls query texts per embedding request.
+        format_case receives a full ranked hit; max_chars caps the joined formatted
+        text per query, returned as formatted_context alongside structured candidates.
         """
         options.setdefault("show_progress", self.show_progress)
         inspect.signature(LocalRetriever.retrieve).bind(

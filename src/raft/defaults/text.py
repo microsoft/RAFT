@@ -1,9 +1,14 @@
-"""Text preparation for the legacy v4 narratives in the current case state.
+"""Default embedding text and agent-facing retrieval context."""
 
-Neither review assessments nor worker handoff notes are retrieval evidence.
-"""
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
 
 from .extraction import CaseExtraction
+
+if TYPE_CHECKING:
+    from raft.retrieval.types import RetrievalHit
 
 
 def state_to_text(state: CaseExtraction) -> list[str]:
@@ -19,3 +24,15 @@ def case_to_text(state: CaseExtraction) -> str:
     if text:
         return text
     return state.timeline[-1].narrative if state.timeline else ""
+
+
+def format_case(hit: RetrievalHit) -> str:
+    """Serialize ID, metadata, complete extracted state, and the matched item index.
+
+    Works with any Pydantic output model, including RootModel. Review assessments
+    and execution diagnostics remain on the structured hit, not in this text.
+    item_index is zero-based in the list returned by the embedding state_to_text.
+    """
+    payload = hit["case"].model_dump(mode="json", include={"id", "metadata", "output"})
+    payload["item_index"] = hit["item_index"]
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
+from typing import Sequence
+
 import numpy as np
 
 from raft._json import _id_key
+
+from .types import CaseFormatter, RetrievalHit
 
 
 def normalize(vectors) -> np.ndarray:
@@ -18,7 +23,9 @@ def normalize(vectors) -> np.ndarray:
     return vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
 
 
-def rank_cases(rows, vectors, query_vector, eligible, cases, lexical, rrf_constant):
+def rank_cases(
+    rows, vectors, query_vector, eligible, cases, lexical, rrf_constant
+) -> list[RetrievalHit]:
     """Rank every eligible entry before deduplication; no entry-level top-k cutoff."""
     dense = dict(zip(eligible, np.clip(vectors[eligible] @ query_vector, -1, 1), strict=True))
 
@@ -36,7 +43,8 @@ def rank_cases(rows, vectors, query_vector, eligible, cases, lexical, rrf_consta
         for rank, i in enumerate(lexical_order, 1):
             scores[i] += 1 / (rrf_constant + rank)
     ranked = sorted(eligible, key=lambda i: (-scores[i], tie(i)))
-    seen, hits = set(), []
+    seen = set()
+    hits: list[RetrievalHit] = []
     for i in ranked:
         row = rows[i]
         key = _id_key(row["case_id"])
@@ -58,13 +66,23 @@ def rank_cases(rows, vectors, query_vector, eligible, cases, lexical, rrf_consta
     return hits
 
 
-def cap_cases(hits, max_chars):
-    """Budget compact JSON case payloads, not vectors or match-score envelopes."""
-    selected, used = [], 0
+def cap_cases(
+    hits: Sequence[RetrievalHit], max_chars: int | None, format_case: CaseFormatter
+) -> tuple[list[RetrievalHit], str, bool]:
+    """Format a ranked prefix once, counting the exact text plus blank-line separators."""
+    selected: list[RetrievalHit] = []
+    parts: list[str] = []
+    used = 0
     for hit in hits:
-        size = len(hit["case"].model_dump_json())
+        text = format_case(hit)
+        if not isinstance(text, str):
+            if inspect.iscoroutine(text):
+                text.close()
+            raise TypeError("format_case must return a string synchronously")
+        size = len(text) + (2 if parts else 0)
         if max_chars is not None and used + size > max_chars:
             break
         selected.append(hit)
+        parts.append(text)
         used += size
-    return selected, used, len(selected) < len(hits)
+    return selected, "\n\n".join(parts), len(selected) < len(hits)

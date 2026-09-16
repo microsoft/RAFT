@@ -174,3 +174,26 @@ def test_notebook_has_no_legacy_synthetic_source_or_agent_directive_overrides(ce
     assert "INSTRUCTIONS +" not in joined
     assert "RunConfig(tracing_disabled=True)" in joined
     assert "graph=None" in joined
+
+
+@pytest.mark.asyncio
+async def test_notebook_filter_demonstrates_custom_state_formatter_and_budget(state, cells):
+    state["question"] = state["queries"][0]
+
+    class Retriever:
+        async def retrieve(self, queries, **options):
+            assert queries == [state["question"]["query_0"]]
+            assert options["max_chars"] == 16_000
+            assert options["top_k"] == state["TOP_K"]
+            from pydantic import RootModel
+
+            case = SimpleNamespace(
+                metadata={"project": state["question"]["project"]},
+                output=RootModel[list[str]](["The matched state"]),
+            )
+            assert options["format_case"]({"case": case}) == '["The matched state"]'
+            assert options["case_filter"](queries[0], case)
+            return {"results": [{"error": None, "candidates": []}]}
+
+    state["pipeline"] = Retriever()
+    await execute(cells["filter"], state)

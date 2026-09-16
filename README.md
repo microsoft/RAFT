@@ -112,15 +112,33 @@ results = await pipeline.retrieve(
 for result in results["results"]:
     if result["error"]:
         raise RuntimeError(result["error"])
+    print(result["formatted_context"])  # Ready-to-use, budgeted context.
     for hit in result["candidates"]:
         case = hit["case"]
         matched_entry = case.output.timeline[hit["item_index"]]
         print(case.id, matched_entry.narrative)
 ```
 
-`top_k` caps distinct cases **per query**. Optional `max_chars` caps serialized
-case content per query, including metadata and execution history; it is a character
-budget, **not a token limit**. Metadata filters and graph expansion are opt-in.
+`top_k` caps distinct cases **per query**. `max_chars` caps the exact returned
+`formatted_context`, including blank-line separators. The default formatter emits
+only **`id`, `metadata`, `output` (extracted state), and `item_index`**—not review
+diagnostics or execution history. Cases that would exceed the budget are not added.
+
+Customize the text with `format_case(hit) -> str`. The hit contains the full
+`hit["case"]` object, `id`, `entry_id`, scores, and zero-based `item_index` (the
+matched position in the embedding text list). For state-only context:
+
+```python
+results = await pipeline.retrieve(
+    queries, top_k=5, max_chars=16_000,
+    format_case=lambda hit: hit["case"].output.model_dump_json(),
+)
+```
+
+Formatters are synchronous and should not mutate the hit. `used_chars` equals
+`len(formatted_context)`; this is a character budget, **not a token limit**.
+Structured candidates still contain the full case. Metadata filters and graph
+expansion are opt-in.
 
 ## Production usage
 

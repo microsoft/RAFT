@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -11,6 +12,7 @@ from pydantic import BaseModel
 
 from raft._json import _id_key
 from raft.cases import ExtractedCase, load_cases, restore_case
+from raft.defaults import format_case as default_format_case
 from raft.embedding import BM25Index, EmbeddingBackend
 from raft.embedding._batching import embed_text_batches, validate_batch_size
 from raft.progress import CaseProgress
@@ -18,6 +20,7 @@ from raft.runtime import _retry_delay, map_concurrent, validate_limits
 from raft.storage import load_jsonl
 
 from .ranking import cap_cases, normalize, rank_cases
+from .types import CaseFormatter
 
 CaseFilter = Callable[[str, ExtractedCase], bool]
 
@@ -116,7 +119,7 @@ class LocalRetriever:
                 eligible.extend(positions)
         return eligible
 
-    def _rank(self, query, vector, eligible, top_k, rrf_constant, max_chars):
+    def _rank(self, query, vector, eligible, top_k, rrf_constant, max_chars, format_case):
         query_vector = normalize([vector])[0]
         if query_vector.shape[0] != self.vectors.shape[1]:
             raise ValueError("Query dimensions must match stored vectors")
@@ -124,7 +127,7 @@ class LocalRetriever:
         hits = rank_cases(
             self.rows, self.vectors, query_vector, eligible, self.cases, lexical, rrf_constant
         )
-        return cap_cases(hits[:top_k], max_chars)
+        return cap_cases(hits[:top_k], max_chars, format_case)
 
     async def retrieve(
         self,
@@ -134,6 +137,7 @@ class LocalRetriever:
         top_k: int = 5,
         case_filter: CaseFilter | None = None,
         max_chars: int | None = None,
+        format_case: CaseFormatter = default_format_case,
         rrf_constant: int = 60,
         batch_size: int = 64,
         concurrency: int = 4,
@@ -154,8 +158,18 @@ class LocalRetriever:
         otherwise cosine. A case's item_index anchors its best-ranked entry
         (the state_to_text list's zero-based index).
 
-        max_chars caps compact JSON case payloads (including metadata/execution),
-        excluding vectors and match envelopes; stop before the first oversize case.
+        format_case(hit) is a synchronous string formatter receiving the full hit:
+        case, id, zero-based item_index, entry_id, scores, and source. The default
+        serializes only id, metadata, output, and item_index, excluding execution
+        history and review diagnostics. Structured candidates retain the full case.
+        The formatter sees at most top_k distinct cases in ranking order.
+
+        formatted_context joins selected case strings with two newlines.
+        max_chars caps its exact character length, including separators; used_chars
+        equals len(formatted_context). Stop before the first case that would exceed
+        the budget, without truncating a case or trying smaller lower-ranked cases.
+        truncated reports removal by the character budget, not the top_k limit.
+        Empty results and failed queries have formatted_context="" and used_chars=0.
 
         CPU work runs in worker threads; callbacks must be pure/thread-safe.
         Per-query failures are returned in error; caller cancellation propagates.
@@ -174,6 +188,14 @@ class LocalRetriever:
             raise ValueError("max_chars must be nonnegative or None")
         if case_filter is not None and not callable(case_filter):
             raise ValueError("case_filter must be callable or None")
+        if (
+            not callable(format_case)
+            or inspect.iscoroutinefunction(format_case)
+            or inspect.isasyncgenfunction(format_case)
+            or inspect.iscoroutinefunction(getattr(format_case, "__call__", None))
+            or inspect.isasyncgenfunction(getattr(format_case, "__call__", None))
+        ):
+            raise ValueError("format_case must be a synchronous callable")
         if not isinstance(queries, list) or any(
             not isinstance(q, str) or not q.strip() for q in queries
         ):
@@ -185,6 +207,7 @@ class LocalRetriever:
             {
                 "query": query,
                 "candidates": [],
+                "formatted_context": "",
                 "used_chars": 0,
                 "truncated": False,
                 "requests": 0,
@@ -245,7 +268,7 @@ class LocalRetriever:
                     result["attempts"] += 1
                 try:
                     async with asyncio.timeout(timeout):
-                        hits, used, truncated = await asyncio.to_thread(
+                        hits, context, truncated = await asyncio.to_thread(
                             self._rank,
                             queries[index],
                             embedded["embedding"],
@@ -253,8 +276,12 @@ class LocalRetriever:
                             top_k,
                             rrf_constant,
                             max_chars,
+                            format_case,
                         )
-                        result.update(candidates=hits, used_chars=used, truncated=truncated)
+                        result.update(
+                            candidates=hits, formatted_context=context,
+                            used_chars=len(context), truncated=truncated,
+                        )
                     break
                 except asyncio.CancelledError:
                     raise

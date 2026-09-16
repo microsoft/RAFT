@@ -133,6 +133,35 @@ async def test_new_index_unchanged_incremental_reopen_and_usage(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pipeline_forwards_formatter_and_budgets_without_changing_saved_history(tmp_path):
+    p = pipeline(tmp_path)
+    await p.index([raw("a", ["opening", "resolved"]), raw("b")])
+    catalog_before = (tmp_path / "catalog.json").read_bytes()
+    result = (await p.retrieve(["opening"], top_k=1))["results"][0]
+    hit = result["candidates"][0]
+    assert json.loads(result["formatted_context"]) == {
+        "id": hit["id"], "metadata": hit["case"].metadata,
+        "output": hit["case"].output.model_dump(), "item_index": hit["item_index"],
+    }
+    assert "usage" in hit["case"].execution
+    received = []
+
+    def formatter(candidate):
+        received.append(candidate)
+        return f"{candidate['id']}:{candidate['item_index']}"
+
+    reopened = pipeline(tmp_path)
+    result = (await reopened.retrieve(
+        ["opening"], top_k=1, max_chars=3, format_case=formatter,
+    ))["results"][0]
+    assert len(received) == 1
+    assert result["formatted_context"] == f"{received[0]['id']}:{received[0]['item_index']}"
+    assert result["used_chars"] == 3
+    assert not result["truncated"] and result["error"] is None
+    assert (tmp_path / "catalog.json").read_bytes() == catalog_before
+
+
+@pytest.mark.asyncio
 async def test_update_replaces_old_entries_and_skip_removes_vectors(tmp_path):
     p = pipeline(tmp_path)
     await p.index([raw("a", ["first", "obsolete"]), raw("b")])
