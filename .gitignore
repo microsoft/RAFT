@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local datasets, experiment outputs, and credentials
+/datasets/mslearn/
+/outputs/
+.env.*
+!.env.example
