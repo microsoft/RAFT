@@ -35,7 +35,7 @@ def test_install_cell_uses_selected_kernel_without_installing_during_tests(cells
     exec(cells["install"], {})
     assert commands == [[
         sys.executable, "-m", "pip", "install", "--quiet", "-e",
-        f"{ROOT}[notebook]", "python-dotenv",
+        str(ROOT), "python-dotenv", "ipywidgets",
     ]]
 
 
@@ -43,7 +43,7 @@ def test_install_cell_uses_selected_kernel_without_installing_during_tests(cells
 def state(cells, monkeypatch, tmp_path):
     import dotenv
 
-    pytest.importorskip("IPython", reason="Notebook execution checks require the notebook extra")
+    pytest.importorskip("IPython", reason="Notebook execution checks require IPython")
     monkeypatch.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: False)
     ns = {}
     exec(cells["setup"], ns)

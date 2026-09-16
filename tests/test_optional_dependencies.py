@@ -20,7 +20,6 @@ def test_dependencies_include_openai_agents_and_optional_integrations():
         "azure",
         "voyage",
         "dev",
-        "notebook",
     } == extras.keys()
     assert any(dep.startswith("azure-identity") for dep in extras["azure"])
     assert not any(dep.startswith("azure-identity") for dep in dependencies)
