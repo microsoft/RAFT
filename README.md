@@ -63,6 +63,10 @@ and resolution steps**. Unknown conclusions remain `null`; filtered cases retain
 their extracted evidence for inspection. Prompts, Pydantic models, embedding text,
 and model clients are all replaceable without editing the pipeline.
 
+Start with our [default worker and reviewer prompts](src/raft/defaults/prompts.py),
+then modify or replace them for your domain. See the
+[example notebook](examples/jira_walkthrough.ipynb) for customization details.
+
 ## Quickstart
 
 ### 1. Install
