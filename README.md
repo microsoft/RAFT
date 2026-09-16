@@ -76,15 +76,15 @@ Optional extras: `azure` for Entra authentication, `voyage` for Voyage embedding
 
 ### 2. Configure credentials
 
-Create a local `.env` in the repository root, or set the equivalent environment variable:
+For example, to use OpenAI, create a local `.env` in the repository root or set:
 
 ```dotenv
 OPENAI_API_KEY=your-api-key
 ```
 
-The walkthrough uses OpenAI for extraction and embeddings. Models and clients are
-configured in the notebook. `.env` and generated `outputs/` are gitignored.
-**Running live examples makes billable API calls.**
+For other models, providers, and authentication options, see the OpenAI Agents SDK
+[models](https://openai.github.io/openai-agents-python/models/) and
+[configuration](https://openai.github.io/openai-agents-python/config/) guides.
 
 ### 3. Run the walkthrough
 
