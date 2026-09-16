@@ -9,12 +9,20 @@
 
 *Accepted to **EMNLP 2026, Industry Track**. arXiv preprint coming soon.*
 
+[![Give your agent the benefit of experience: historical cases feed RAFT, which returns relevant evidence to a troubleshooting agent as its queries evolve.](assets/raft-hero.svg)](assets/raft-hero.svg)
+
 > Retrieve similar troubleshooting states, not just similar documents.
 
-RAFT turns historical support cases into reusable investigation trajectories.
-As a new case evolves from symptoms to diagnosis, your agent can retrieve past
-cases that match its **current understanding**, along with the evidence and
-resolution path that followed.
+RAFT is built for **technical support cases where resolution takes an investigation,
+not a single answer**:
+
+**Initial symptoms → investigation → root-cause confirmation → resolution or mitigation**
+
+It distills noisy conversations, logs, and notes into searchable case trajectories,
+with configurable filtering for cases that offer no reusable technical insight.
+Your troubleshooting agents can find similar cases at **the right stage of the
+investigation**—with the evidence, diagnostic steps, and resolution path together,
+rather than scattered across disconnected chunks.
 
 [Overview](#overview) · [Agent workflow](#agent-workflow) · [Quickstart](#quickstart) · [Production usage](#production-usage) · [Citation](#paper-and-citation)
 
