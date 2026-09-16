@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 @dataclass
 class _Progress:
     state: Any = field(default_factory=dict)
+    handoff_notes: list[dict[str, Any]] = field(default_factory=list)
     position: int = 0
     offset: int = 0
     passes: int = 0
@@ -112,6 +113,13 @@ async def run_cases(
     Provider-internal retries are not visible. suppress_response_errors optionally
     hides repeated SDK response-error log lines only within this extraction call.
     Exceptions still propagate to RAFT and terminal failures retain their details.
+    Handoff notes are package-owned working context, separate from output_type.
+    Attach raft.tools.write_handoff_note to the worker to write one note per pass.
+    Notes are append-only records with pass number and the supplied artifact range.
+    A pass can omit a note; repeated writes replace only its uncommitted note.
+    The reviewer receives all records read-only. Notes and state commit
+    together per successful pass; failed attempts discard both drafts. Final notes
+    and note snapshots are returned in execution, including on filtered/failed cases.
     """
     validate_limits(concurrency, timeout, retries, rpm)
     if type(suppress_response_errors) is not bool:
@@ -170,6 +178,7 @@ async def run_cases(
                 "passes": progress.passes,
                 "attempts": attempts,
                 "revisions": context.revisions() if context is not None else [],
+                "handoff_notes": deepcopy(progress.handoff_notes),
             }
 
         def failure(exc: Exception, decision: RetryDecision, failure_type: str):
@@ -242,11 +251,14 @@ async def run_cases(
                             output=worker_state,
                             target_schema=output_type.model_json_schema(),
                             worker_final_revision=progress.passes,
+                            handoff_notes=progress.handoff_notes,
                             coverage=_coverage_payload(
                                 context, progress.position, progress.offset
                             ),
                         )
-                        review_context = context.for_review(worker_state)
+                        review_context = context.for_review(
+                            worker_state, handoff_notes=progress.handoff_notes
+                        )
                         try:
                             async with scheduler.slot():
                                 telemetry = RunTelemetry()
@@ -366,8 +378,16 @@ async def _work(
             batch_budget=batch_budget,
             pass_number=progress.passes + 1,
             validation_error=progress.validation_error,
+            handoff_notes=progress.handoff_notes,
         )
-        context.begin_pass(progress.state, is_final_batch=batch.is_last)
+        context.begin_pass(
+            progress.state, handoff_notes=progress.handoff_notes, is_final_batch=batch.is_last,
+            pass_number=progress.passes + 1,
+            artifact_range={
+                "start_position": progress.position,
+                "end_position_exclusive": batch.next_position,
+            } if batch.items else None,
+        )
         async with scheduler.slot():
             await _invoke(agent_runner, agent, prompt, context, progress, attempt, max_turns)
         if not context.pass_finished:
@@ -384,8 +404,10 @@ async def _work(
             validated.model_dump(mode="json")
             if validated is not None else deepcopy(context.pending_state)
         )
+        committed_notes = context.pending_handoff_notes
         context.commit_revision(committed_state, pass_number=progress.passes + 1)
         progress.state = committed_state
+        progress.handoff_notes = committed_notes
         progress.position, progress.offset = batch.next_position, batch.next_offset
         progress.passes += 1
         if validated is not None:

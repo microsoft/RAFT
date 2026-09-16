@@ -9,6 +9,7 @@ import pytest
 from agent_helpers import run_cases
 from agents import Agent
 from jsonpath import patch as json_patch
+from pydantic import RootModel
 from test_extraction import Output, case, edit, options
 from test_query_limits import case_context
 from test_review import Review
@@ -109,6 +110,7 @@ def test_evidence_supports_whole_artifacts_escaped_keys_and_array_items():
     context = _build_case_context(
         {"id": "a", "meta": {}, "items": [{"a/b~c": ["evidence"]}]},
         id_field="id", artifacts_field="items", metadata_field="meta", artifact_sort_field=None,
+        final_output_type=RootModel[dict],
     )
     try:
         references = [
@@ -143,7 +145,7 @@ async def test_reviewer_recovers_deleted_content_and_filter_sees_corrected_state
             assert apply_edit(
                 context=context,
                 patch_json='[{"op":"add","path":"/timeline/0","value":"earlier"}]',
-                note="Restore the earlier observation after checking the source",
+                edit_note="Restore the earlier observation after checking the source",
                 evidence=[EvidenceReference(artifact_position=0, json_pointer="/text")],
             )["ok"]
             assert not context.pass_finished  # Structured response completes review.

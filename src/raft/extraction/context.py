@@ -13,6 +13,8 @@ from pydantic import BaseModel
 from raft._json import _to_json
 from raft._text_budget import budget_summary, measure_text, validate_budget
 
+from .handoff import ArtifactRange, HandoffNote, validate_handoff_notes
+
 MAX_SQL_SECONDS = 2.0
 DEFAULT_BATCH_CHARS = 400_000
 DEFAULT_QUERY_CHARS = 50_000
@@ -50,6 +52,10 @@ class CaseContext:
     _owns_writer: bool = field(default=True, repr=False)
     pending_state: Any = field(default_factory=dict)
     pending_edits: list[dict[str, Any]] = field(default_factory=list)
+    _handoff_notes: tuple[HandoffNote, ...] = field(default_factory=tuple, repr=False)
+    _pending_handoff_note: HandoffNote | None = field(default=None, repr=False)
+    _pass_number: int | None = field(default=None, repr=False)
+    _artifact_range: ArtifactRange | None = field(default=None, repr=False)
     pass_finished: bool = False
     is_final_batch: bool = True
     stage: Literal["worker", "reviewer"] = "worker"
@@ -59,14 +65,43 @@ class CaseContext:
         if self._owns_writer:
             self._writer.close()
 
-    def begin_pass(self, committed_state: Any, *, is_final_batch: bool = True) -> None:
+    def begin_pass(
+        self, committed_state: Any, *, handoff_notes: list[dict[str, Any]] | None = None,
+        is_final_batch: bool = True, pass_number: int | None = None,
+        artifact_range: dict[str, int] | None = None,
+    ) -> None:
+        notes = validate_handoff_notes([] if handoff_notes is None else handoff_notes)
+        if pass_number is not None and (type(pass_number) is not int or pass_number < 1):
+            raise ValueError("pass_number must be a positive integer")
+        if notes and (pass_number is None or pass_number <= notes[-1].pass_number):
+            raise ValueError("A worker pass must follow all committed handoff notes")
+        source_range = ArtifactRange.model_validate(artifact_range) if artifact_range is not None else None
+        if source_range is not None and source_range.end_position_exclusive > len(self.artifact_char_counts):
+            raise ValueError("artifact_range must reference supplied source positions")
         self.pending_state = copy.deepcopy(committed_state)
         self.pending_edits = []
+        self._handoff_notes = notes
+        self._pending_handoff_note = None
+        self._pass_number = pass_number
+        self._artifact_range = source_range
         self.pass_finished = False
         self.is_final_batch = is_final_batch
 
-    def for_review(self, output: Any) -> CaseContext:
+    @property
+    def pending_handoff_notes(self) -> list[dict[str, Any]]:
+        """Return a detached view; only this pass's draft record can be overwritten."""
+        records = self._handoff_notes
+        if self.stage == "worker" and self._pending_handoff_note is not None:
+            records = (*records, self._pending_handoff_note)
+        return [record.model_dump(mode="json") for record in records]
+
+    def for_review(
+        self, output: Any, *, handoff_notes: list[dict[str, Any]] | None = None
+    ) -> CaseContext:
         """Create an isolated draft and reader; the case retains database ownership."""
+        notes = validate_handoff_notes(
+            self.pending_handoff_notes if handoff_notes is None else handoff_notes
+        )
         return replace(
             self,
             connection=_reader_connection(self._database_uri, stage="reviewer"),
@@ -74,6 +109,10 @@ class CaseContext:
             metadata=copy.deepcopy(self.metadata),
             pending_state=copy.deepcopy(output),
             pending_edits=[],
+            _handoff_notes=notes,
+            _pending_handoff_note=None,
+            _pass_number=None,
+            _artifact_range=None,
             query_budget=dict(self.query_budget),
             pass_finished=False,
             is_final_batch=True,
@@ -82,11 +121,17 @@ class CaseContext:
 
     def commit_revision(self, state: Any, *, pass_number: int | None) -> None:
         """Runner-only write after a successful invocation; never exposed as SQL."""
+        notes = self.pending_handoff_notes
+        if self._pending_handoff_note is not None and self.stage == "worker":
+            if self._pending_handoff_note.pass_number != pass_number:
+                raise ValueError("Handoff note metadata must match the committed pass")
         with self._writer:
             self._writer.execute(
-                "INSERT INTO state_revisions (stage, pass_number, state_json, edits_json) "
-                "VALUES (?, ?, ?, ?)",
-                (self.stage, pass_number, _to_json(state), _to_json(self.pending_edits)),
+                "INSERT INTO state_revisions "
+                "(stage, pass_number, state_json, edits_json, handoff_notes_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (self.stage, pass_number, _to_json(state), _to_json(self.pending_edits),
+                 _to_json(notes)),
             )
 
     def revisions(self) -> list[dict[str, Any]]:
@@ -98,9 +143,10 @@ class CaseContext:
                 "pass_number": pass_number,
                 "state": json.loads(state),
                 "edits": json.loads(edits),
+                "handoff_notes": json.loads(notes),
             }
-            for revision_id, stage, pass_number, state, edits in self._writer.execute(
-                "SELECT revision_id, stage, pass_number, state_json, edits_json "
+            for revision_id, stage, pass_number, state, edits, notes in self._writer.execute(
+                "SELECT revision_id, stage, pass_number, state_json, edits_json, handoff_notes_json "
                 "FROM state_revisions ORDER BY revision_id"
             )
         ]
@@ -231,7 +277,8 @@ def _build_case_context(
                 stage TEXT NOT NULL CHECK (stage IN ('worker', 'reviewer')),
                 pass_number INTEGER,
                 state_json TEXT NOT NULL,
-                edits_json TEXT NOT NULL
+                edits_json TEXT NOT NULL,
+                handoff_notes_json TEXT NOT NULL
             )
             """
         )

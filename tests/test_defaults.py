@@ -22,8 +22,9 @@ from raft.defaults import (
     state_to_text,
 )
 from raft.extraction import _agent as sdk
+from raft.extraction.handoff import apply_handoff_note
 from raft.extraction.state import apply_edit
-from raft.tools import edit_state, query_case_sql
+from raft.tools import edit_state, query_case_sql, write_handoff_note
 
 INITIAL_NARRATIVE = (
     "Windows Server 2019 reports 0xC004F074 during activation on the customer's "
@@ -51,7 +52,6 @@ def extraction(**changes):
             ],
             "root_cause": None,
             "resolution_steps": None,
-            "handoff_notes": ["Check whether activation logs were ever supplied."],
             **changes,
         }
     )
@@ -110,7 +110,7 @@ def test_default_retrieval_formatter_supports_arbitrary_root_state_and_json_meta
 def test_schema_preserves_legacy_v4_fields_without_delta_protocol():
     schema = CaseExtraction.model_json_schema()
     assert set(schema["properties"]) == {
-        "entities", "timeline", "root_cause", "resolution_steps", "handoff_notes"
+        "entities", "timeline", "root_cause", "resolution_steps"
     }
     assert set(schema["required"]) == {
         "entities", "timeline", "root_cause", "resolution_steps"
@@ -197,12 +197,11 @@ def test_conclusion_limits_and_explicit_nulls(field, limit):
             extraction(**{field: invalid})
 
 
-def test_optional_handoff_lists_are_independent_without_defaulting_case_facts():
+def test_case_output_does_not_own_handoff_notes():
     data = {"entities": [], "timeline": [], "root_cause": None, "resolution_steps": None}
-    first, second = CaseExtraction(**data), CaseExtraction(**data)
-    first.handoff_notes.append("Await logs.")
-    assert second.handoff_notes == []
-    assert second.model_dump() == {**data, "handoff_notes": []}
+    assert CaseExtraction(**data).model_dump() == data
+    with pytest.raises(ValidationError, match="handoff_notes"):
+        CaseExtraction(**data, handoff_notes=["Await logs."])
 
 
 @pytest.mark.parametrize(
@@ -339,9 +338,25 @@ def test_worker_preserves_current_pass_protocol():
         assert phrase in WORKER_INSTRUCTIONS
 
 
+def test_worker_distinguishes_incomplete_drafts_from_real_validation_mistakes():
+    for phrase in (
+        "state_valid and validation_errors",
+        "ok=true means the edit was accepted",
+        "Distinguish expected incompleteness from genuine mistakes",
+        "wrong types, unknown fields, or constraint",
+        "Do not ignore all missing-field",
+        "the field should already exist at this stage",
+        "Do not invent",
+        "the final batch must satisfy the complete schema",
+        "ok=false with patch_applied=true",
+        "do not reapply the original edits",
+    ):
+        assert phrase in WORKER_INSTRUCTIONS
+
+
 def test_final_reviewer_retains_useful_guidance_and_separates_assessment():
     for phrase in (
-        "state_revisions(revision_id, stage, pass_number, state_json, edits_json)",
+        "state_revisions(revision_id, stage, pass_number, state_json, edits_json, handoff_notes_json)",
         "worker_final_revision",
         "including deleted information",
         "not independently verified",
@@ -366,7 +381,10 @@ def test_final_reviewer_retains_useful_guidance_and_separates_assessment():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("keep", [True, False])
 async def test_defaults_complete_worker_passes_then_review_without_losing_state(monkeypatch, keep):
-    worker = Agent(name="worker", instructions=WORKER_INSTRUCTIONS, tools=[query_case_sql, edit_state])
+    worker = Agent(
+        name="worker", instructions=WORKER_INSTRUCTIONS,
+        tools=[query_case_sql, edit_state, write_handoff_note],
+    )
     reviewer = Agent(
         name="reviewer",
         instructions=REVIEWER_INSTRUCTIONS,
@@ -402,9 +420,9 @@ async def test_defaults_complete_worker_passes_then_review_without_losing_state(
             assert json.loads(item["artifact_json"]) == artifacts[len(seen) - 1]
             state = payload["current_state"] or {
                 "entities": [], "timeline": [], "root_cause": None,
-                "resolution_steps": None, "handoff_notes": [],
+                "resolution_steps": None,
             }
-            state["handoff_notes"].append(f"Processed artifact {item['position']}.")
+            assert apply_handoff_note(context=context, note=f"Processed artifact {item['position']}.")["ok"]
             # Deliberately unconfirmed conclusion for the final reviewer to remove.
             state["root_cause"] = "Unverified activation-host failure."
             edited = apply_edit(
@@ -420,6 +438,9 @@ async def test_defaults_complete_worker_passes_then_review_without_losing_state(
             assert payload["coverage"]["complete"]
             assert payload["worker_final_revision"] == 2
             assert payload["output"]["root_cause"] == "Unverified activation-host failure."
+            assert [n["note"] for n in payload["handoff_notes"]] == [
+                "Processed artifact 0.", "Processed artifact 1.",
+            ]
             assert context.query("SELECT count(*) AS n FROM state_revisions")["rows"] == [{"n": 2}]
             corrected = apply_edit(
                 context=context,
@@ -457,7 +478,10 @@ async def test_defaults_complete_worker_passes_then_review_without_losing_state(
     assert record.output.timeline == []
     assert record.output.root_cause is None
     assert record.output.resolution_steps is None
-    assert record.output.handoff_notes == ["Processed artifact 0.", "Processed artifact 1."]
+    assert "handoff_notes" not in record.output.model_dump()
+    assert [n["note"] for n in record.execution["handoff_notes"]] == [
+        "Processed artifact 0.", "Processed artifact 1.",
+    ]
     assert record.review.model_dump() == review_data
     revisions = record.execution["revisions"]
     assert [revision["stage"] for revision in revisions] == ["worker", "worker", "reviewer"]

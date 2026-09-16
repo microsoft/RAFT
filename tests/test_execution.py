@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from ast import literal_eval
 
 import pytest
 from agent_helpers import REVIEWER, WorkerTestRunner, run_cases
@@ -22,7 +23,7 @@ from raft.extraction._agent import _AgentRunner
 from raft.extraction.context import CaseContext
 from raft.extraction.state import apply_edit
 from raft.storage import save_json
-from raft.tools import edit_state, query_case_sql
+from raft.tools import edit_state, query_case_sql, write_handoff_note
 
 
 class Output(BaseModel):
@@ -94,7 +95,7 @@ def options(model, tools=(), **kwargs):
 
 def check_usage(execution, requests):
     assert set(execution) == {
-        "usage", "tool_calls", "elapsed_seconds", "passes", "attempts", "revisions"
+        "usage", "tool_calls", "elapsed_seconds", "passes", "attempts", "revisions", "handoff_notes"
     }
     usage = execution["usage"]["unknown"]
     assert usage["requests"] == requests
@@ -412,7 +413,7 @@ async def test_real_sdk_reviewer_queries_history_repairs_draft_and_returns_struc
             }, "invalid")],
             [call("edit_state", {
                 "patch_json": '[{"op":"add","path":"/text","value":"corrected"}]',
-                "note": "Corrected using original evidence",
+                "edit_note": "Corrected using original evidence",
                 "evidence": [{"artifact_position": 0, "json_pointer": "/text"}],
             }, "repair")],
             [message('{"keep":false}')],
@@ -437,3 +438,112 @@ async def test_real_sdk_reviewer_queries_history_repairs_draft_and_returns_struc
     assert rounds[1]["calls"][0]["output"]["patch_applied"]
     assert not rounds[1]["calls"][0]["output"]["ok"]
     assert rounds[2]["calls"][0]["output"]["ok"]
+
+
+@pytest.mark.asyncio
+async def test_real_sdk_worker_sees_advisory_feedback_then_repairs_final_state():
+    observed = []
+
+    class WorkerModel(ScriptedModel):
+        async def get_response(self, *args, **kwargs):
+            tool_outputs = [
+                item for item in kwargs["input"] if item.get("type") == "function_call_output"
+            ]
+            if tool_outputs:
+                observed.append(literal_eval(tool_outputs[-1]["output"]))
+            return await super().get_response(*args, **kwargs)
+
+    model = WorkerModel([
+        # A non-final pass can commit an incomplete draft.
+        [call("edit_state", {"patch_json": "[]", "finish_pass": True}, "incomplete")],
+        [message("First pass complete.")],
+        # On the last batch an ordinary edit still provides advisory feedback.
+        [call("edit_state", {
+            "patch_json": '[{"op":"add","path":"/text","value":123}]',
+        }, "wrong-type")],
+        [call("edit_state", {"patch_json": "[]", "finish_pass": True}, "blocked")],
+        [call("edit_state", {
+            "patch_json": '[{"op":"replace","path":"/text","value":"repaired"}]',
+            "finish_pass": True,
+        }, "repaired")],
+        [message("Final pass complete.")],
+    ])
+    result = await run_cases(**options(model, batch_budget={"unit": "chars", "limit": 13}))
+    assert result["failed_cases"] == []
+    case = result["extracted_cases"][0]
+    assert case.output.text == "repaired"
+    assert case.execution["passes"] == 2 and case.execution["attempts"] == 1
+    assert case.execution["revisions"][0]["state"] == {}
+    assert case.execution["revisions"][1]["state"] == {"text": "repaired"}
+    assert len(observed) == 4
+    assert [(item["ok"], item["state_valid"], item["pass_finished"]) for item in observed] == [
+        (True, False, True), (True, False, False), (False, False, False), (True, True, True),
+    ]
+    assert observed[0]["validation_errors"][0]["type"] == "missing"
+    assert observed[1]["validation_errors"][0]["type"] == "string_type"
+    assert observed[2]["patch_applied"] is True
+    assert observed[3]["validation_errors"] == []
+
+
+@pytest.mark.asyncio
+async def test_real_sdk_handoff_tool_carries_pass_records_and_rejects_reviewer_writes():
+    class Assessment(BaseModel):
+        keep: bool
+
+    observed = []
+
+    class NotesModel(ScriptedModel):
+        async def get_response(self, *args, **kwargs):
+            items = kwargs["input"]
+            if len(items) == 1:
+                content = items[0]["content"]
+                payload = json.loads(content.split("\n", 1)[1])
+                observed.append(payload["handoff_notes"])
+                assert "handoff_notes" not in payload["target_output_schema"]["properties"]
+            return await super().get_response(*args, **kwargs)
+
+    worker = NotesModel([
+        [call("write_handoff_note", {"note": "Check later evidence."}, "notes-first")],
+        [edit_call("initial", "initial-edit")],
+        [message("done")],
+        [call("write_handoff_note", {"note": "Ask reviewer to verify."}, "notes-next")],
+        [edit_call("final", "final-edit")],
+        [message("done")],
+    ])
+    reviewer = Agent(
+        name="reviewer", tools=[query_case_sql, edit_state, write_handoff_note],
+        output_type=Assessment,
+        model=NotesModel([
+            [call("query_case_sql", {
+                "query": "SELECT handoff_notes_json FROM state_revisions ORDER BY revision_id",
+            }, "notes-history")],
+            [call("write_handoff_note", {"note": "Not allowed."}, "review-note")],
+            [edit_call("reviewed", "review-edit")],
+            [message('{"keep":true}')],
+        ]),
+    )
+    result = await run_cases(**options(
+        worker, tools=[write_handoff_note], reviewer_agent=reviewer,
+        batch_budget={"unit": "chars", "limit": 13},
+    ))
+    assert not result["failed_cases"], result["failed_cases"]
+    record = result["extracted_cases"][0]
+    expected = [
+        {"pass_number": 1, "artifact_range": {"start_position": 0, "end_position_exclusive": 1},
+         "note": "Check later evidence."},
+        {"pass_number": 2, "artifact_range": {"start_position": 1, "end_position_exclusive": 2},
+         "note": "Ask reviewer to verify."},
+    ]
+    assert observed == [[], expected[:1], expected]
+    assert record.output.text == "reviewed"
+    assert record.execution["handoff_notes"] == expected
+    history = record.execution["revisions"]
+    assert [r["handoff_notes"] for r in history] == [
+        expected[:1], expected, expected,
+    ]
+    outputs = record.execution["tool_calls"][-1]["rounds"]
+    assert [json.loads(row["handoff_notes_json"])
+            for row in outputs[0]["calls"][0]["output"]["rows"]] == [expected[:1], expected]
+    assert outputs[1]["calls"][0]["output"] == {
+        "ok": False, "error": "Handoff notes are read-only in this context.",
+    }

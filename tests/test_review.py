@@ -8,9 +8,10 @@ from pydantic import BaseModel
 from test_extraction import case, edit, options
 from test_local_pipeline import pipeline, raw
 
-from raft.cases import restore_case
+from raft.cases import ExtractedCase, restore_case
 from raft.defaults import CaseExtraction
 from raft.extraction import _agent as sdk
+from raft.extraction.handoff import apply_handoff_note
 from raft.tools import edit_state, query_case_sql
 
 
@@ -130,10 +131,11 @@ async def test_filtered_catalog_preserves_record_and_skips_embedding(tmp_path):
 
 
 def test_default_handoff_notes_independent():
-    a = CaseExtraction(entities=[], timeline=[], root_cause=None, resolution_steps=None)
-    b = CaseExtraction(entities=[], timeline=[], root_cause=None, resolution_steps=None)
-    a.handoff_notes.append("Check certificate date")
-    assert b.handoff_notes == []
+    state = CaseExtraction(entities=[], timeline=[], root_cause=None, resolution_steps=None)
+    a = ExtractedCase(id="a", metadata={}, output=state)
+    b = ExtractedCase(id="b", metadata={}, output=state)
+    a.execution["handoff_notes"].append("Check certificate date")
+    assert b.execution["handoff_notes"] == []
 
 
 @pytest.mark.asyncio
@@ -177,9 +179,10 @@ async def test_handoff_notes_carried_between_worker_passes(monkeypatch):
 
     async def run(agent, prompt, *, context, **kwargs):
         payload = json.loads(prompt.split("Pass context:\n")[1])
-        notes = payload["current_state"].get("handoff_notes", [])
+        notes = [record["note"] for record in payload["handoff_notes"]]
         assert notes == seen
         seen.append(f"Note from pass {len(seen) + 1}")
+        assert apply_handoff_note(context=context, note=seen[-1])["ok"]
         assert edit(
             context,
             [
@@ -191,7 +194,6 @@ async def test_handoff_notes_carried_between_worker_passes(monkeypatch):
                         "timeline": [],
                         "root_cause": None,
                         "resolution_steps": None,
-                        "handoff_notes": list(seen),
                     },
                 }
             ],
@@ -203,7 +205,8 @@ async def test_handoff_notes_carried_between_worker_passes(monkeypatch):
         cases=[case(text="x" * 140)], **options(output_type=CaseExtraction, batch_budget={"unit": "chars", "limit": 170})
     )
     assert len(seen) > 1
-    assert result["extracted_cases"][0].output.handoff_notes == seen
+    assert [record["note"] for record in result["extracted_cases"][0].execution["handoff_notes"]] == seen
+    assert "handoff_notes" not in result["extracted_cases"][0].output.model_dump()
 
 
 @pytest.mark.asyncio

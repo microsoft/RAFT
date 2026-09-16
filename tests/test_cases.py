@@ -81,6 +81,7 @@ async def test_extraction_keeps_every_model_and_generic_id():
             "passes",
             "attempts",
             "revisions",
+            "handoff_notes",
         }
 
 

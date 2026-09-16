@@ -54,7 +54,7 @@ def apply_edit(
     context: CaseContext,
     patch_json: str,
     finish_pass: bool = False,
-    note: str | None = None,
+    edit_note: str | None = None,
     evidence: list[EvidenceReference] | None = None,
 ) -> dict[str, Any]:
     if context.pass_finished:
@@ -79,25 +79,33 @@ def apply_edit(
         return {"ok": False, "error": str(exc)}
 
     context.pending_state = updated_state
-    context.pending_edits.append({"patch": operations, "note": note, "evidence": references})
+    context.pending_edits.append({
+        "patch": operations, "edit_note": edit_note, "evidence": references
+    })
 
-    if context.stage == "reviewer" or (finish_pass and context.is_final_batch):
-        try:
-            context.final_output_type.model_validate(updated_state, by_name=True)
-        except ValidationError as exc:
-            return {
-                "ok": False,
-                "patch_applied": True,
-                "error": "Final state validation failed.",
-                "validation_errors": exc.errors(include_url=False),
-            }
+    validation_errors = []
+    try:
+        # Validation feedback must not let custom validators mutate the editable draft.
+        context.final_output_type.model_validate(deepcopy(updated_state), by_name=True)
+    except ValidationError as exc:
+        # Custom validator errors can contain exception objects in their context.
+        validation_errors = json.loads(exc.json(include_url=False))
 
-    if finish_pass:
+    blocked = bool(validation_errors) and (
+        context.stage == "reviewer" or (finish_pass and context.is_final_batch)
+    )
+    if finish_pass and not blocked:
         context.pass_finished = True
 
-    return {
-        "ok": True,
+    result = {
+        "ok": not blocked,
+        "patch_applied": True,
+        "state_valid": not validation_errors,
+        "validation_errors": validation_errors,
         "operations_applied": len(operations),
         "pass_finished": context.pass_finished,
         "is_final_batch": context.is_final_batch,
     }
+    if blocked:
+        result["error"] = "Final state validation failed."
+    return result

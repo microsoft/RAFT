@@ -25,6 +25,7 @@ class ExtractedCase(BaseModel, Generic[StateT]):
             "elapsed_seconds": 0.0,
             "passes": 0,
             "attempts": 0,
+            "handoff_notes": [],
             "revisions": [],
         }
     )
@@ -33,7 +34,16 @@ class ExtractedCase(BaseModel, Generic[StateT]):
 def restore_case(
     case: ExtractedCase | dict[str, Any], output_type: type[BaseModel] | None = None
 ) -> ExtractedCase:
-    """Reuse live records unchanged; reconstruct outputs only for serialized cases."""
+    """Reuse live records unchanged; reconstruct outputs only for serialized cases.
+
+    Only serialized dictionaries for the exact default ``CaseExtraction`` migrate
+    legacy output handoff notes into execution metadata. Legacy revision states
+    and patches remain unchanged, including embedded notes, original JSON Patch
+    paths, and the old ``note`` audit field, for exact audit/replay compatibility.
+    Older note strings remain unannotated; pass/artifact provenance is recorded
+    only by new extraction runs, never inferred for historical notes.
+    Custom output types (including subclasses and root models) are not migrated.
+    """
     if isinstance(case, ExtractedCase):
         if output_type is not None and not isinstance(case.output, output_type):
             raise ValueError("Case output does not match output_type")
@@ -49,9 +59,31 @@ def restore_case(
         return ExtractedCase[type(output)](**case)
     if output_type is None:
         raise ValueError("Provide output_type to restore a saved case's Pydantic output")
-    return ExtractedCase[output_type](
+
+    legacy_notes = None
+    if isinstance(output, dict) and "handoff_notes" in output:
+        from .defaults.extraction import CaseExtraction
+
+        if output_type is CaseExtraction:
+            legacy_notes = output["handoff_notes"]
+            if not isinstance(legacy_notes, list) or not all(
+                isinstance(note, str) for note in legacy_notes
+            ):
+                raise ValueError("Legacy output.handoff_notes must be a list of strings")
+            output = {key: value for key, value in output.items() if key != "handoff_notes"}
+
+    restored = ExtractedCase[output_type](
         **{**case, "output": output_type.model_validate(output, by_name=True)}
     )
+    if legacy_notes is not None:
+        if (
+            "execution" in case
+            and "handoff_notes" in restored.execution
+            and restored.execution["handoff_notes"] != legacy_notes
+        ):
+            raise ValueError("Conflicting output.handoff_notes and execution.handoff_notes")
+        restored.execution = {**restored.execution, "handoff_notes": list(legacy_notes)}
+    return restored
 
 
 def load_cases(path: str | Path, *, output_type: type[StateT]) -> list[ExtractedCase[StateT]]:

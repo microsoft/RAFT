@@ -5,6 +5,7 @@ from contextlib import contextmanager
 
 import pytest
 from agent_helpers import run_cases
+from pydantic import RootModel
 
 from raft.extraction.context import _build_case_context
 
@@ -15,6 +16,7 @@ def case_context(limit):
         {"id": "case", "meta": {}, "items": [{"text": "abcdefghij"}]},
         id_field="id", metadata_field="meta", artifacts_field="items",
         artifact_sort_field=None, query_budget={"unit": "chars", "limit": limit},
+        final_output_type=RootModel[dict],
     )
     try:
         yield context

@@ -17,6 +17,7 @@ def _case_prompt(
     batch_budget: dict[str, Any],
     pass_number: int,
     validation_error: str | None,
+    handoff_notes: list[dict[str, Any]],
 ) -> str:
     """Supply changing pass data without injecting a second instruction prompt."""
     payload = {
@@ -25,6 +26,7 @@ def _case_prompt(
         "metadata": metadata,
         "target_output_schema": target_schema,
         "current_state": current_state,
+        "handoff_notes": handoff_notes,
         "coverage": coverage,
         "batch": batch,
         "batch_budget": budget_summary(batch_budget),
@@ -41,11 +43,13 @@ def _review_prompt(
     target_schema: dict[str, Any],
     worker_final_revision: int,
     coverage: dict[str, Any],
+    handoff_notes: list[dict[str, Any]],
 ) -> str:
     return "Review context:\n" + _to_json({
         "id": case_id,
         "metadata": metadata,
         "output": output,
+        "handoff_notes": handoff_notes,
         "target_output_schema": target_schema,
         "worker_final_revision": worker_final_revision,
         "coverage": coverage,

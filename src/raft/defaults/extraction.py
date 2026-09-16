@@ -3,6 +3,7 @@
 The legacy ``RunningState`` fields now form one editable ``CaseExtraction``.
 ``CaseReview`` replaces the early verdict without discarding the worker state.
 There are no node deltas, terminal flags, or latched/append-only merge semantics.
+Handoff notes are owned by execution context, not this output model.
 Applications can supply their own Pydantic models instead.
 """
 
@@ -97,15 +98,6 @@ class CaseExtraction(BaseModel):
             "Use null for unknown/unconfirmed resolution, not a proposed fix."
         ),
     )
-    handoff_notes: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Accumulated context, unresolved questions, and follow-up checks for "
-            "later worker passes, with follow-up outcomes. Preserve earlier context. "
-            "This optional orchestration field is not a retrieval narrative."
-        ),
-    )
-
     @field_validator("root_cause", "resolution_steps")
     @classmethod
     def unknown_is_null(cls, value: str | None) -> str | None:
