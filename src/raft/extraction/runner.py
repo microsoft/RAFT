@@ -10,6 +10,7 @@ from pydantic import BaseModel, ValidationError
 
 from raft._json import _id_key
 from raft.cases import ExtractedCase
+from raft.progress import CaseProgress
 from raft.runtime import (
     IncompletePassError,
     PassLimitError,
@@ -21,6 +22,7 @@ from raft.runtime import (
     validate_limits,
 )
 
+from ._logging import quiet_response_errors
 from .batching import next_batch
 from .context import (
     DEFAULT_BATCH_CHARS,
@@ -75,6 +77,7 @@ async def run_cases(
     | Callable[[Agent, CaseContext], RunConfig | Awaitable[RunConfig]]
     | None = None,
     show_progress: bool = False,
+    suppress_response_errors: bool = False,
 ) -> dict[str, Any]:
     """Extract every case through ordered preloaded batches and tool-based edits.
 
@@ -99,8 +102,15 @@ async def run_cases(
     after a worker picks it up. retries is a case-wide budget; a worker retry
     resumes the last committed state and coverage with a fresh timeout.
     rpm counts SDK runs (including worker passes, reviews, and retries), not model turns.
+    Progress retries count scheduled RAFT case retries; rate_limited counts observed
+    transient throttles, and waiting_retry counts case attempts currently backing off.
+    Provider-internal retries are not visible. suppress_response_errors optionally
+    hides repeated SDK response-error log lines only within this extraction call.
+    Exceptions still propagate to RAFT and terminal failures retain their details.
     """
     validate_limits(concurrency, timeout, retries, rpm)
+    if type(suppress_response_errors) is not bool:
+        raise ValueError("suppress_response_errors must be a bool")
     if agent_concurrency is not None and (
         type(agent_concurrency) is not int or agent_concurrency < 1
     ):
@@ -266,13 +276,15 @@ async def run_cases(
                         decision = RetryDecision(False, "max_case_passes")
                     else:
                         decision = agent_runner.classify_error(exc)
+                    case_progress.observe_error(decision.category)
                     if not decision.retryable or attempt == retries:
                         return failure(
                             exc,
                             decision,
                             "retry_exhausted" if decision.retryable else "terminal_error",
                         )
-                    await asyncio.sleep(_retry_delay(decision, attempts))
+                    with case_progress.retry_wait():
+                        await asyncio.sleep(_retry_delay(decision, attempts))
 
             item = ExtractedCase[output_type](
                 id=case_id,
@@ -298,10 +310,14 @@ async def run_cases(
             if context is not None:
                 context.close()
 
-    outcomes = await map_concurrent(
-        work, process, concurrency, show_progress=show_progress, progress_desc="Extraction",
-        progress_status=lambda result: "succeeded" if result[0] == "extracted" else result[0],
-    )
+    with (
+        CaseProgress(len(work), enabled=show_progress, desc="Extraction") as case_progress,
+        quiet_response_errors(suppress_response_errors),
+    ):
+        outcomes = await map_concurrent(
+            work, process, concurrency, progress=case_progress,
+            progress_status=lambda result: "succeeded" if result[0] == "extracted" else result[0],
+        )
     statuses = (
         ("extracted", "failed", "filtered") if should_keep is not None else ("extracted", "failed")
     )

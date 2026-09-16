@@ -501,6 +501,39 @@ async def test_retry_usage_failure_isolation_and_cancellation(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_query_error_retains_provider_diagnostics():
+    import httpx2
+    import openai
+
+    from raft._openai_errors import classify_error
+
+    class Unavailable(Backend):
+        async def embed(self, texts, *, input_type="document"):
+            raise openai.NotFoundError(
+                "No such embedding deployment",
+                response=httpx2.Response(
+                    404, headers={"x-request-id": "embed-test"},
+                    request=httpx2.Request("POST", "https://provider.example"),
+                ),
+                body={"code": "DeploymentNotFound"},
+            )
+
+        def classify_error(self, exc):
+            return classify_error(exc)
+
+    cases, rows = fixture()
+    result = (await search(
+        LocalRetriever(cases=cases, embeddings=rows), backend=Unavailable(), retries=3,
+    ))[0]
+    assert result["attempts"] == result["requests"] == 1
+    assert result["error"]["details"] == {
+        "status_code": 404, "code": "DeploymentNotFound", "request_id": "embed-test",
+    }
+    assert result["error"]["retryable"] is False
+    assert result["candidates"] == [] and result["formatted_context"] == ""
+
+
+@pytest.mark.asyncio
 async def test_concurrency_and_timeout():
     class Slow(Backend):
         active = maximum = 0

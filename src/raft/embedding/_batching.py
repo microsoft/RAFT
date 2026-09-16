@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from contextlib import nullcontext
 from typing import Any, Callable, Literal, Sequence
 
+from raft.progress import CaseProgress
 from raft.runtime import _retry_delay, _RollingRateLimiter, map_concurrent, validate_limits
 
 from .backend import EmbeddingBackend, EmbeddingBatch
@@ -28,6 +30,7 @@ async def embed_text_batches(
     retries: int,
     rpm: int,
     on_item: Callable[[int, dict[str, Any]], None] | None = None,
+    progress: CaseProgress | None = None,
 ) -> dict[str, Any]:
     """Embed ready inputs without waiting for other calls to fill a batch.
 
@@ -40,6 +43,8 @@ async def embed_text_batches(
     Aggregate usage counts each observed response once, including malformed
     responses. Token usage is reported only at operation level.
     Per-item attempts/requests count participation, not disjoint HTTP requests.
+    An optional caller-owned progress counts retries/throttles once per batch,
+    not once per item; it does not advance terminal item counts or own the bar.
     """
     validate_limits(concurrency, timeout, retries, rpm)
     validate_batch_size(batch_size)
@@ -98,8 +103,11 @@ async def embed_text_batches(
                 raise
             except Exception as exc:
                 decision = backend.classify_error(exc)
+                if progress is not None:
+                    progress.observe_error(decision.category)
                 if decision.retryable and attempt < retries:
-                    await asyncio.sleep(_retry_delay(decision, attempt + 1))
+                    with progress.retry_wait() if progress is not None else nullcontext():
+                        await asyncio.sleep(_retry_delay(decision, attempt + 1))
                     continue
                 if (
                     not decision.retryable

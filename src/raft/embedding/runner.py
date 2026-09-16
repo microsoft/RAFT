@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from raft._json import _id_key, _to_json
 from raft.cases import ExtractedCase, restore_case
+from raft.progress import CaseProgress
 from raft.runtime import (
     RetryDecision,
     _failed_case,
@@ -168,11 +169,13 @@ async def embed_cases(
                 raise
             except Exception as exc:
                 decision = backend.classify_error(exc)
+                progress.observe_error(decision.category)
                 if not decision.retryable or attempt == retries:
                     return failure(
                         exc, decision, "retry_exhausted" if decision.retryable else "terminal_error"
                     )
-                await asyncio.sleep(_retry_delay(decision, attempts))
+                with progress.retry_wait():
+                    await asyncio.sleep(_retry_delay(decision, attempts))
 
         records = []
         for index, (text, vector) in enumerate(zip(texts, vectors, strict=True)):
@@ -198,10 +201,11 @@ async def embed_cases(
             "elapsed_seconds": round(time.monotonic() - started, 3),
         }
 
-    outcomes = await map_concurrent(
-        work, process, concurrency, show_progress=show_progress, progress_desc=progress_desc,
-        progress_status=lambda result: "succeeded" if result[0] == "embedded" else result[0],
-    )
+    with CaseProgress(len(work), enabled=show_progress, desc=progress_desc) as progress:
+        outcomes = await map_concurrent(
+            work, process, concurrency, progress=progress,
+            progress_status=lambda result: "succeeded" if result[0] == "embedded" else result[0],
+        )
     embedded_cases = [item for status, item in outcomes if status == "embedded"]
     skipped_cases = [item for status, item in outcomes if status == "skipped"]
     failed_cases = [item for status, item in outcomes if status == "failed"]

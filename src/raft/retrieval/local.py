@@ -16,7 +16,7 @@ from raft.defaults import format_case as default_format_case
 from raft.embedding import BM25Index, EmbeddingBackend
 from raft.embedding._batching import embed_text_batches, validate_batch_size
 from raft.progress import CaseProgress
-from raft.runtime import _retry_delay, map_concurrent, validate_limits
+from raft.runtime import _error_details, _retry_delay, map_concurrent, validate_limits
 from raft.storage import load_jsonl
 
 from .ranking import cap_cases, normalize, rank_cases
@@ -218,12 +218,16 @@ class LocalRetriever:
         ]
 
         def error_record(exc, decision):
-            return {
+            record = {
                 "type": type(exc).__name__,
                 "message": str(exc),
                 "category": decision.category,
                 "retryable": decision.retryable,
             }
+            details = _error_details(exc)
+            if details:
+                record["details"] = details
+            return record
 
         def finish(index):
             result = results[index]
@@ -247,10 +251,12 @@ class LocalRetriever:
                     raise
                 except Exception as exc:
                     decision = backend.classify_error(exc)
+                    progress.observe_error(decision.category)
                     if not decision.retryable or attempt == retries:
                         result["error"] = error_record(exc, decision)
                         break
-                    await asyncio.sleep(_retry_delay(decision, attempt + 1))
+                    with progress.retry_wait():
+                        await asyncio.sleep(_retry_delay(decision, attempt + 1))
             finish(index)
             return None
 
@@ -287,10 +293,12 @@ class LocalRetriever:
                     raise
                 except Exception as exc:
                     decision = backend.classify_error(exc)
+                    progress.observe_error(decision.category)
                     if not decision.retryable or attempt == retries:
                         result["error"] = error_record(exc, decision)
                         break
-                    await asyncio.sleep(_retry_delay(decision, attempt + 1))
+                    with progress.retry_wait():
+                        await asyncio.sleep(_retry_delay(decision, attempt + 1))
             finish(index)
 
         with CaseProgress(
@@ -307,6 +315,7 @@ class LocalRetriever:
                 timeout=timeout,
                 retries=retries,
                 rpm=rpm,
+                progress=progress,
             )
             await map_concurrent(list(zip(ready, embedded["items"], strict=True)), rank, concurrency)
         return {

@@ -140,6 +140,7 @@ async def build_case_graph(
             retries=retries,
             rpm=rpm,
             on_item=complete,
+            progress=progress,
         )
     nodes = [completed[position][0] for position in sorted(completed)]
     embeddings = [completed[position][1] for position in sorted(completed)]

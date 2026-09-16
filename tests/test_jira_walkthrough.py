@@ -33,6 +33,18 @@ def state(cells, monkeypatch, tmp_path):
     monkeypatch.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: False)
     ns = {}
     exec(cells["setup"], ns)
+    retrieval_settings = ast.Module(
+        body=[
+            node for node in ast.parse(cells["retrieve"]).body
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in {
+                "TOP_K", "MAX_CHARS", "RETRIEVAL_CONCURRENCY", "RETRIEVAL_RPM"
+            }
+        ],
+        type_ignores=[],
+    )
+    exec(compile(retrieval_settings, "retrieval-settings", "exec"), ns)
     data_dir = tmp_path / "datasets/Apache_Jira"
     data_dir.mkdir(parents=True)
     corpus = [
@@ -73,7 +85,7 @@ def state(cells, monkeypatch, tmp_path):
 def test_ten_case_default_and_labels_never_reach_model_inputs(state):
     assert state["CASE_LIMIT"] == 10
     assert len(state["cases"]) == 2
-    assert state["MODEL"] == "gpt-5.4"
+    assert state["MAX_CHARS"] == 16_000
     first = state["cases"][0]
     assert first == {
         "id": "JIRA-1",
@@ -86,14 +98,14 @@ def test_ten_case_default_and_labels_never_reach_model_inputs(state):
 
 def test_explicit_small_run_does_not_change_held_out_query_set(state, cells):
     state["CASE_LIMIT"] = 1
-    exec(cells["data"], state)
+    exec(cells["data"].replace("CASE_LIMIT = 10", "CASE_LIMIT = 1"), state)
     assert len(state["cases"]) == 1
     assert len(state["queries"]) == 2
 
 
 def test_full_corpus_option_keeps_every_case(state, cells):
     state["CASE_LIMIT"] = None
-    exec(cells["data"], state)
+    exec(cells["data"].replace("CASE_LIMIT = 10", "CASE_LIMIT = None"), state)
     assert len(state["cases"]) == len(state["corpus"])
 
 
@@ -117,6 +129,9 @@ async def test_final_cell_uses_valid_query_zero_and_exact_target_key(
         async def retrieve(self, queries, **options):
             assert queries == ["Initial symptoms only."]
             assert options["top_k"] == 5
+            assert options["max_chars"] == state["MAX_CHARS"]
+            assert options["concurrency"] == state["RETRIEVAL_CONCURRENCY"]
+            assert options["rpm"] == state["RETRIEVAL_RPM"]
             assert "case_filter" not in options
             return {"results": [{"error": None, "candidates": [{"id": returned_id}]}]}
 
@@ -133,6 +148,7 @@ async def test_final_cell_uses_valid_query_zero_and_exact_target_key(
     report = json.loads((state["OUTPUT_DIR"] / "case_hits.json").read_text())
     assert report["progress"] == 0
     assert report["indexed_cases"] == 2
+    assert report["max_chars"] == state["MAX_CHARS"]
     assert len(report["results"]) == 1
     assert report["results"][0]["hit"] is expected_hit
     assert closed == [True]
@@ -151,7 +167,7 @@ async def test_failed_query_cannot_be_scored_as_a_miss(state, cells):
 
 
 @pytest.mark.asyncio
-async def test_index_failure_is_saved_and_blocks_continuation(state, cells):
+async def test_index_failure_is_retained_in_memory_and_blocks_continuation(state, cells):
     class Pipeline:
         async def index(self, cases):
             return {
@@ -164,7 +180,35 @@ async def test_index_failure_is_saved_and_blocks_continuation(state, cells):
     state["pipeline"] = Pipeline()
     with pytest.raises(RuntimeError, match="Indexing incomplete"):
         await execute(cells["index"], state)
-    assert (state["OUTPUT_DIR"] / "last_extraction.json").exists()
+    assert state["failures"][0]["error_type"] == "TimeoutError"
+    assert not (state["OUTPUT_DIR"] / "last_extraction.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_failure_display_is_bounded_and_keeps_full_details(state, cells, capsys):
+    class Pipeline:
+        async def index(self, cases):
+            return {
+                "extraction": {"failed_cases": [
+                    {
+                        "id": f"CASE-{i}", "error_type": "NotFoundError",
+                        "error_message": "full detail " * 500,
+                        "error_details": {"status_code": 404, "code": "model_not_found"},
+                    } for i in range(20)
+                ]},
+                "embedding": {"failed_cases": []},
+            }
+
+    capsys.readouterr()
+    state["pipeline"] = Pipeline()
+    with pytest.raises(RuntimeError, match=r"failures\[0\]"):
+        await execute(cells["index"], state)
+    output = capsys.readouterr().out
+    assert len(output.splitlines()) == 6
+    assert "CASE-4" in output and "CASE-5" not in output
+    assert len(output) < 2000
+    assert len(state["failures"]) == 20
+    assert len(state["failures"][0]["error_message"]) > 200
 
 
 def test_notebook_has_no_legacy_synthetic_source_or_agent_directive_overrides(cells):
@@ -174,16 +218,18 @@ def test_notebook_has_no_legacy_synthetic_source_or_agent_directive_overrides(ce
     assert "INSTRUCTIONS +" not in joined
     assert "RunConfig(tracing_disabled=True)" in joined
     assert "graph=None" in joined
+    assert "'suppress_response_errors': True" in cells["pipeline"]
 
 
 @pytest.mark.asyncio
 async def test_notebook_filter_demonstrates_custom_state_formatter_and_budget(state, cells):
     state["question"] = state["queries"][0]
+    state["MAX_CHARS"] = 1234
 
     class Retriever:
         async def retrieve(self, queries, **options):
             assert queries == [state["question"]["query_0"]]
-            assert options["max_chars"] == 16_000
+            assert options["max_chars"] == 1234
             assert options["top_k"] == state["TOP_K"]
             from pydantic import RootModel
 
@@ -197,3 +243,43 @@ async def test_notebook_filter_demonstrates_custom_state_formatter_and_budget(st
 
     state["pipeline"] = Retriever()
     await execute(cells["filter"], state)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [1234, None])
+async def test_main_retrieval_uses_configured_character_cap(state, cells, limit):
+    state["MAX_CHARS"] = limit
+
+    class Retriever:
+        async def retrieve(self, queries, **options):
+            assert options["max_chars"] == limit
+            return {"results": [{"error": None, "candidates": [], "used_chars": 0}]}
+
+    state["pipeline"] = Retriever()
+    await execute(cells["retrieve"].replace("MAX_CHARS = 16_000", f"MAX_CHARS = {limit}"), state)
+
+
+def test_settings_are_local_to_their_stage_not_shared_globals(cells):
+    setup = ast.parse(cells["setup"])
+    setup_names = {
+        target.id for node in setup.body if isinstance(node, ast.Assign)
+        for target in node.targets if isinstance(target, ast.Name)
+    }
+    assert not setup_names & {
+        "CASE_LIMIT", "MODEL", "EMBEDDING_MODEL", "CONCURRENCY", "RPM",
+        "TOP_K", "MAX_CHARS", "BUILD_GRAPH", "RUN_NAME", "OUTPUT_DIR",
+    }
+    configurations = {
+        node.targets[0].id: node.value
+        for node in ast.parse(cells["pipeline"]).body
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+    }
+    for name in ("extraction", "embedding"):
+        config = configurations[name]
+        values = {key.value: value for key, value in zip(config.keys, config.values)}
+        assert isinstance(values["concurrency"], ast.Constant)
+        assert isinstance(values["rpm"], ast.Constant)
+    assert "BUILD_GRAPH = False" in cells["graph"]
+    assert "CASE_LIMIT = 10" in cells["data"]
+    assert "worker_model =" in cells["agents"]
+    assert "reviewer_model =" in cells["agents"]

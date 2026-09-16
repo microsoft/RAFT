@@ -13,7 +13,14 @@ from pydantic import BaseModel
 from raft.embedding import BM25Index
 from raft.extraction._agent import classify_error
 from raft.extraction.state import apply_edit
-from raft.runtime import RetryDecision, _retry_delay, _RollingRateLimiter, map_concurrent
+from raft.runtime import (
+    RetryDecision,
+    _error_details,
+    _failed_case,
+    _retry_delay,
+    _RollingRateLimiter,
+    map_concurrent,
+)
 from raft.tools import edit_state, query_case_sql
 
 
@@ -61,6 +68,43 @@ def test_quota_vs_transient_rate_limit_and_retry_after():
     assert not classify_error(exc).retryable
     assert not classify_error(ValueError("bad input")).retryable
     assert not classify_error(RuntimeError("bug")).retryable
+
+
+def test_error_details_are_allowlisted_and_do_not_copy_credentials_or_response_body():
+    response = httpx2.Response(
+        429,
+        headers={
+            "retry-after": "12", "x-request-id": "req-test",
+            "authorization": "Bearer not-for-diagnostics", "set-cookie": "private-cookie",
+        },
+        request=httpx2.Request("POST", "https://provider.example"),
+    )
+    exc = openai.RateLimitError(
+        "throttled", response=response,
+        body={"error": {"code": "rate_limit_exceeded", "private": "model-input"}},
+    )
+    expected = {
+        "status_code": 429, "code": "rate_limit_exceeded", "request_id": "req-test",
+        "retry_after": 12.0,
+    }
+    assert _error_details(exc) == expected
+    failure = _failed_case(
+        case_id="a", case={}, category="rate_limit", error=exc,
+        retryable=True, attempts=3, elapsed=1.25, failure_type="retry_exhausted",
+    )
+    assert failure["error_details"] == expected
+    assert "headers" not in failure and "body" not in failure
+
+
+def test_nonprovider_errors_keep_the_existing_failure_shape():
+    exc = ValueError("invalid input")
+    assert _error_details(exc) == {}
+    failure = _failed_case(
+        case_id="a", case={}, category="invalid_case", error=exc,
+        retryable=False, attempts=0, elapsed=0,
+    )
+    assert "error_details" not in failure
+    assert failure["error_message"] == "invalid input"
 
 
 @pytest.mark.asyncio

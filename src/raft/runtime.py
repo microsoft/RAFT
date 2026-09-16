@@ -5,7 +5,7 @@ import email.utils
 import random
 import time
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Sequence, TypeVar
@@ -27,19 +27,23 @@ async def map_concurrent(
     items: Sequence[T], operation: Callable[[T], Awaitable[R]], concurrency: int,
     *, show_progress: bool = False, progress_desc: str = "Processing",
     progress_status: Callable[[R], str] | None = None, progress_unit: str = "case",
+    progress: CaseProgress | None = None,
 ) -> list[R]:
-    """Use a fixed number of workers and preserve input order."""
+    """Use fixed workers in input order; an optional opened progress is caller-owned."""
     iterator = iter(enumerate(items))
     results: list[Any] = [None] * len(items)
 
     async def worker() -> None:
         for index, item in iterator:
             results[index] = await operation(item)
-            progress.advance(progress_status(results[index]) if progress_status else "succeeded")
+            active_progress.advance(
+                progress_status(results[index]) if progress_status else "succeeded"
+            )
 
-    with CaseProgress(
-        len(items), enabled=show_progress, desc=progress_desc, unit=progress_unit
-    ) as progress:
+    with (
+        nullcontext(progress) if progress is not None else
+        CaseProgress(len(items), enabled=show_progress, desc=progress_desc, unit=progress_unit)
+    ) as active_progress:
         workers = [asyncio.create_task(worker()) for _ in range(min(concurrency, len(items)))]
         try:
             # TaskGroup treats a child's cancellation as normal completion, which
@@ -159,7 +163,7 @@ def _failed_case(
     elapsed: float,
     failure_type: str = "invalid_case",
 ) -> dict[str, Any]:
-    return {
+    record = {
         "id": case_id,
         "case": case,
         "failure_type": failure_type,
@@ -170,6 +174,34 @@ def _failed_case(
         "attempts": attempts,
         "elapsed_seconds": round(elapsed, 3),
     }
+    details = _error_details(error)
+    if details:
+        record["error_details"] = details
+    return record
+
+
+def _error_details(error: Exception) -> dict[str, Any]:
+    """Select provider diagnostics without copying response bodies or arbitrary headers."""
+    details = {}
+    status = getattr(error, "status_code", None)
+    if type(status) is int:
+        details["status_code"] = status
+    request_id = getattr(error, "request_id", None)
+    if isinstance(request_id, str) and request_id:
+        details["request_id"] = request_id
+    code = getattr(error, "code", None)
+    if not isinstance(code, str):
+        body = getattr(error, "body", None)
+        if isinstance(body, dict):
+            nested = body.get("error")
+            code = nested.get("code") if isinstance(nested, dict) else body.get("code")
+    if isinstance(code, str) and code:
+        details["code"] = code
+    headers = getattr(getattr(error, "response", None), "headers", None)
+    retry_after = _retry_after(headers)
+    if retry_after is not None:
+        details["retry_after"] = retry_after
+    return details
 
 
 def _retry_delay(decision: RetryDecision, attempts: int) -> float:
