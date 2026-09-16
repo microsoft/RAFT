@@ -25,6 +25,20 @@ def cells():
     return sources
 
 
+def test_install_cell_uses_selected_kernel_without_installing_during_tests(cells, monkeypatch):
+    import subprocess
+    import sys
+
+    commands = []
+    monkeypatch.chdir(ROOT / "examples")
+    monkeypatch.setattr(subprocess, "check_call", lambda command: commands.append(command))
+    exec(cells["install"], {})
+    assert commands == [[
+        sys.executable, "-m", "pip", "install", "--quiet", "-e",
+        f"{ROOT}[notebook]", "python-dotenv",
+    ]]
+
+
 @pytest.fixture
 def state(cells, monkeypatch, tmp_path):
     import dotenv

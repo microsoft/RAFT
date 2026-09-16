@@ -67,12 +67,11 @@ cd RAFT
 
 conda create -n raft python=3.12 -y
 conda activate raft
-python -m pip install -e ".[notebook]" jupyterlab python-dotenv
+python -m pip install -e .
 ```
 
-For library-only use, install with `python -m pip install -e .`.
 Optional extras: `azure` for Entra authentication, `voyage` for Voyage embeddings,
-`notebook` for progress widgets, and `dev` for development tools.
+and `dev` for development tools.
 
 ### 2. Configure credentials
 
@@ -86,22 +85,11 @@ For other models, providers, and authentication options, see the OpenAI Agents S
 [models](https://openai.github.io/openai-agents-python/models/) and
 [configuration](https://openai.github.io/openai-agents-python/config/) guides.
 
-### 3. Run the walkthrough
+Check out our [example notebook](examples/jira_walkthrough.ipynb) for usage guidance.
 
-```bash
-python -m jupyterlab examples/jira_walkthrough.ipynb
-```
+### 3. Retrieve
 
-The [walkthrough](examples/jira_walkthrough.ipynb) uses the
-[Apache Jira benchmark](datasets/Apache_Jira/README.md): 600 historical issues and
-30 held-out reports. It covers extraction, BM25/vector retrieval, 0%-progress case-hit evaluation,
-optional graph expansion, and reopening an index, with short customization notes.
-The notebook starts with 10 cases; set `CASE_LIMIT=None` for the full corpus.
-
-### 4. Retrieve from your agent
-
-Once you have a configured and indexed `LocalPipeline`, your agent can query it
-whenever the active case changes:
+Query a configured and indexed `LocalPipeline`:
 
 ```python
 results = await pipeline.retrieve(
