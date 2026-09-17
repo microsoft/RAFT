@@ -19,17 +19,17 @@ def state_to_text(state: SupportCase) -> list[str]:
     without also changing format_case's index mapping. Avoid attaching the final
     cause or resolution to early entries: each anchor should reflect that stage.
     """
-    return [entry.narrative for entry in state.timeline]
+    return list(state.timeline)
 
 
 def case_to_text(state: SupportCase) -> str:
-    """Link cases by exact error codes plus confirmed cause/resolution."""
+    """Link cases by exact error codes and their cause/resolution accounts."""
     codes = ", ".join(entity.name for entity in state.entities if entity.kind == "error_code")
     conclusions = "\n".join(
         text for text in (state.root_cause, state.resolution_steps) if text is not None
     )
     if not conclusions and state.timeline:
-        conclusions = state.timeline[-1].narrative
+        conclusions = state.timeline[-1]
     return "\n".join(part for part in (f"Error codes: {codes}" if codes else "", conclusions) if part)
 
 
@@ -50,7 +50,7 @@ def format_case(hit: RetrievalHit) -> str:
         "id": case.id,
         "item_index": index,
         "entities": [entity.model_dump(mode="json") for entity in state.entities],
-        "timeline": [entry.narrative for entry in state.timeline],
+        "timeline": list(state.timeline),
         "root_cause": state.root_cause,
         "resolution_steps": state.resolution_steps,
     }

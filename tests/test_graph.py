@@ -267,8 +267,8 @@ def test_default_case_to_text():
         "the customer confirmed that portal login worked again with the new certificate."
     )
     state = CaseExtraction(
-        entities=[{"name": "AUTH-401"}],
-        timeline=[{"narrative": narrative}],
+        entities=["AUTH-401"],
+        timeline=[narrative],
         root_cause="expired certificate",
         resolution_steps="renewed certificate",
     )

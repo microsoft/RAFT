@@ -37,7 +37,8 @@ def restore_case(
     """Reuse live records unchanged; reconstruct outputs only for serialized cases.
 
     Only serialized dictionaries for the exact default ``CaseExtraction`` migrate
-    legacy output handoff notes into execution metadata. Legacy revision states
+    legacy entity/timeline wrappers to strings and output handoff notes into
+    execution metadata. Legacy revision states
     and patches remain unchanged, including embedded notes, original JSON Patch
     paths, and the old ``note`` audit field, for exact audit/replay compatibility.
     Older note strings remain unannotated; pass/artifact provenance is recorded
@@ -61,16 +62,23 @@ def restore_case(
         raise ValueError("Provide output_type to restore a saved case's Pydantic output")
 
     legacy_notes = None
-    if isinstance(output, dict) and "handoff_notes" in output:
+    if isinstance(output, dict):
         from .defaults.extraction import CaseExtraction
 
         if output_type is CaseExtraction:
-            legacy_notes = output["handoff_notes"]
-            if not isinstance(legacy_notes, list) or not all(
-                isinstance(note, str) for note in legacy_notes
-            ):
-                raise ValueError("Legacy output.handoff_notes must be a list of strings")
+            if "handoff_notes" in output:
+                legacy_notes = output["handoff_notes"]
+                if not isinstance(legacy_notes, list) or not all(
+                    isinstance(note, str) for note in legacy_notes
+                ):
+                    raise ValueError("Legacy output.handoff_notes must be a list of strings")
             output = {key: value for key, value in output.items() if key != "handoff_notes"}
+            for field, member in (("entities", "name"), ("timeline", "narrative")):
+                if isinstance(output.get(field), list):
+                    output[field] = [
+                        item[member] if isinstance(item, dict) and set(item) == {member} else item
+                        for item in output[field]
+                    ]
 
     restored = ExtractedCase[output_type](
         **{**case, "output": output_type.model_validate(output, by_name=True)}

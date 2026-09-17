@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 def state_to_text(state: CaseExtraction) -> list[str]:
     """Embed each self-contained narrative directly, preserving timeline order."""
-    return [entry.narrative for entry in state.timeline]
+    return list(state.timeline)
 
 
 def case_to_text(state: CaseExtraction) -> str:
@@ -23,7 +23,7 @@ def case_to_text(state: CaseExtraction) -> str:
     )
     if text:
         return text
-    return state.timeline[-1].narrative if state.timeline else ""
+    return state.timeline[-1] if state.timeline else ""
 
 
 def format_case(hit: RetrievalHit) -> str:

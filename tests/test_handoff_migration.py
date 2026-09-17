@@ -12,7 +12,7 @@ from raft.defaults.extraction import CaseExtraction, CaseReview
 
 def output_data():
     return {
-        "entities": [{"name": "connection_error"}],
+        "entities": ["connection_error"],
         "timeline": [],
         "root_cause": None,
         "resolution_steps": None,
@@ -20,8 +20,9 @@ def output_data():
 
 
 def legacy_case(notes):
-    initial_state = {**output_data(), "handoff_notes": []}
-    output = {**output_data(), "handoff_notes": notes}
+    legacy_output = {**output_data(), "entities": [{"name": "connection_error"}]}
+    initial_state = {**legacy_output, "handoff_notes": []}
+    output = {**legacy_output, "handoff_notes": notes}
     return {
         "id": "legacy",
         "metadata": {"product": "example", "nested": {"tags": ["original"]}},

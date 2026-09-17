@@ -22,7 +22,6 @@ from examples.custom_text import case_to_text, format_case, state_to_text
 from examples.model_routing import round_robin_run_config
 from raft import ExtractedCase
 from raft.defaults import REVIEWER_INSTRUCTIONS, WORKER_INSTRUCTIONS, CaseExtraction, CaseReview
-from raft.defaults.extraction import TimelineEntry
 from raft.retrieval.types import RetrievalHit
 
 
@@ -34,18 +33,18 @@ def state():
             SupportEntity(name="AUTH_CERT_EXPIRED", kind="error_code"),
         ],
         timeline=[
-            TimelineEntry(narrative=(
+            (
                 "The login-service returned AUTH_CERT_EXPIRED during authentication requests. "
                 "The support engineer requested the configured certificate's validity period "
                 "and the system clock reading to distinguish an expired certificate from clock "
                 "skew. Neither explanation had yet been confirmed by the available evidence."
-            )),
-            TimelineEntry(narrative=(
+            ),
+            (
                 "The login-service certificate inspection showed an expired validity period, "
                 "while the system clock matched the time source. The engineer rotated the "
                 "certificate and repeated the failed login request. Authentication succeeded "
                 "after rotation, confirming the resolution for this case."
-            )),
+            ),
         ],
         root_cause="The authentication certificate had expired.",
         resolution_steps="Rotated the certificate and confirmed successful authentication.",
@@ -76,24 +75,23 @@ def test_custom_schema_and_prompts_preserve_workflow_contract(state):
         assert "reference guidance, not proof" in prompt
     with pytest.raises(ValidationError):
         SupportEntity(name="AUTH_CERT_EXPIRED")
-    with pytest.raises(ValidationError):
-        SupportEntity(name=" ", kind="error_code")
+    assert SupportEntity(name=" ", kind="error_code").name == " "
     with pytest.raises(ValidationError):
         SupportEntity(name="AUTH_CERT_EXPIRED", kind="unrecognized")
 
 
 @pytest.mark.parametrize("field", ["root_cause", "resolution_steps"])
-def test_unknown_conclusions_must_be_null_not_whitespace(state, field):
+def test_custom_conclusions_use_only_maximum_length_constraints(state, field):
     value = state.model_dump()
     value[field] = "  "
-    with pytest.raises(ValidationError):
-        SupportCase.model_validate(value)
+    assert getattr(SupportCase.model_validate(value), field) == "  "
     value[field] = None
     assert getattr(SupportCase.model_validate(value), field) is None
 
 
 def test_text_views_preserve_anchor_mapping_and_exclude_execution(state):
-    assert state_to_text(state) == [entry.narrative for entry in state.timeline]
+    assert state_to_text(state) == state.timeline
+    assert state_to_text(state) is not state.timeline
     linking = case_to_text(state)
     assert linking == "\n".join([
         "Error codes: AUTH_CERT_EXPIRED", state.root_cause, state.resolution_steps,
@@ -113,7 +111,7 @@ def test_text_views_preserve_anchor_mapping_and_exclude_execution(state):
 def test_unresolved_and_empty_graph_text(state):
     unresolved = state.model_copy(update={"root_cause": None, "resolution_steps": None})
     assert case_to_text(unresolved) == (
-        "Error codes: AUTH_CERT_EXPIRED\n" + unresolved.timeline[-1].narrative
+        "Error codes: AUTH_CERT_EXPIRED\n" + unresolved.timeline[-1]
     )
     empty = SupportCase(entities=[], timeline=[], root_cause=None, resolution_steps=None)
     assert state_to_text(empty) == []

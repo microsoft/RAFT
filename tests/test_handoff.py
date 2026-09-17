@@ -433,14 +433,14 @@ async def test_default_state_embeddings_ignore_execution_notes():
     from test_local_pipeline import Embeddings
 
     state = CaseExtraction(
-        entities=[], timeline=[{"narrative": "Supported technical evidence. " * 10}],
+        entities=[], timeline=["Supported technical evidence. " * 10],
         root_cause=None, resolution_steps=None,
     )
     record = ExtractedCase(id="a", metadata={}, output=state,
                            execution={"handoff_notes": [note_record("PRIVATE-REMINDER")]})
     backend = Embeddings()
     result = await embed_cases(cases=[record], backend=backend, state_to_text=state_to_text)
-    assert backend.calls == [[state.timeline[0].narrative]]
+    assert backend.calls == [[state.timeline[0]]]
     retriever = LocalRetriever.from_embeddings(result["embedded_cases"])
     hit = (await retriever.retrieve(["evidence"], backend=backend))["results"][0]["candidates"][0]
     assert "PRIVATE-REMINDER" not in format_case(hit)
