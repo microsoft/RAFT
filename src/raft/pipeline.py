@@ -46,7 +46,7 @@ class LocalPipeline:
         for config in (self.extraction, self.embedding, self.graph):
             if config is not None:
                 config.setdefault("show_progress", show_progress)
-        # Reject missing/legacy parameters before any paid processing begins.
+        # Validate stage options before any paid processing begins.
         inspect.signature(run_cases).bind(cases=[], **self.extraction)
         if self.extraction["reviewer_agent"] is None:
             raise ValueError("reviewer_agent is required")
@@ -88,7 +88,7 @@ class LocalPipeline:
                 )
             return catalog
         catalog["embedding_space"] = self.embedding_space
-        # Import the existing snapshot format once. Original files are untouched.
+        # Initialize the catalog from snapshot files without modifying them.
         path = self.output_dir / "extraction.json"
         if path.exists():
             cases = load_cases(path, output_type=self.output_type)

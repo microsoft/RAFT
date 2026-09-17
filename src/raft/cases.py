@@ -36,14 +36,10 @@ def restore_case(
 ) -> ExtractedCase:
     """Reuse live records unchanged; reconstruct outputs only for serialized cases.
 
-    Only serialized dictionaries for the exact default ``CaseExtraction`` migrate
-    legacy entity/timeline wrappers to strings and output handoff notes into
-    execution metadata. Legacy revision states
-    and patches remain unchanged, including embedded notes, original JSON Patch
-    paths, and the old ``note`` audit field, for exact audit/replay compatibility.
-    Older note strings remain unannotated; pass/artifact provenance is recorded
-    only by new extraction runs, never inferred for historical notes.
-    Custom output types (including subclasses and root models) are not migrated.
+    For the exact default ``CaseExtraction``, normalize wrapped entity/timeline
+    text to strings and move output handoff notes into execution metadata.
+    Preserve saved revisions and patches verbatim. Custom output models,
+    including subclasses and root models, are validated without normalization.
     """
     if isinstance(case, ExtractedCase):
         if output_type is not None and not isinstance(case.output, output_type):
