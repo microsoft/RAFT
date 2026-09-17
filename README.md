@@ -58,6 +58,9 @@ as its agent backend to process each case through a **worker + final reviewer** 
 Adapt the [default prompts](src/raft/defaults/prompts.py), Pydantic models,
 embedding text, and model clients to your domain without changing the pipeline.
 The [example notebook](examples/jira_walkthrough.ipynb) shows how.
+For focused Python examples, see [models and prompts](examples/custom_extraction.py),
+[text formatters](examples/custom_text.py), [agents and tools](examples/custom_agents.py),
+and [per-run model/endpoint routing](examples/model_routing.py).
 
 ## Quickstart
 
