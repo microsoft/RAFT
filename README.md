@@ -5,9 +5,9 @@
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
 [![OpenAI Agents SDK](https://img.shields.io/badge/OpenAI-Agents_SDK-111111?style=flat-square&logo=openai&logoColor=white)](https://github.com/openai/openai-agents-python)
 [![MIT License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
-[![arXiv coming soon](https://img.shields.io/badge/arXiv-coming_soon-b31b1b?style=flat-square)](#paper-and-citation)
+[![arXiv 2609.20754](https://img.shields.io/badge/arXiv-2609.20754-b31b1b?style=flat-square)](https://arxiv.org/abs/2609.20754)
 
-*Accepted to **EMNLP 2026, Industry Track**. arXiv preprint coming soon.*
+*Accepted to **EMNLP 2026, Industry Track**. [Read the paper on arXiv](https://arxiv.org/abs/2609.20754).*
 
 [![Give your agent the benefit of experience: historical cases feed RAFT, which returns relevant evidence to a troubleshooting agent as its queries evolve.](assets/raft-hero.svg)](assets/raft-hero.svg)
 
@@ -131,11 +131,17 @@ They support bounded batches, configurable concurrency/retries, and per-case fai
 returning results in memory without saving them. `LocalPipeline` is for quick local
 experiments.
 
-Equip both the worker and reviewer with tools for consulting internal documentation
-and error catalogs. Tailor the `entities` field in the
-[default output model](src/raft/defaults/extraction.py) to your domain's identifiers
-and attributes to support precise case filtering and targeted searches across your
-knowledge base.
+**Adapt RAFT to your historical cases.** We strongly recommend equipping both
+the worker and reviewer with tools to search your private knowledge base, internal
+documentation, and error catalogs. Add background context about your products,
+terminology, and case data to their instructions. Replace the generic `entities`
+field in the [default output model](src/raft/defaults/extraction.py) with
+application-specific identifiers and attributes for filtering and knowledge lookup.
+Tailor the reviewer's instructions and acceptance criteria to what makes an
+extracted case accurate and useful for your application.
+
+Timeline entries are a key part of RAFT's design. Modifications are welcome,
+though we recommend keeping the core idea intact.
 
 Process cases incrementally and store/search the results in a service such as
 **[Microsoft Azure AI Search](https://learn.microsoft.com/en-us/azure/search/)**,
@@ -174,9 +180,7 @@ async for batch in case_source.batches(size=100):
 Mingxuan Zhang, Xiaowen Wang, Anupma Sharan, Zhengyi Chen, Chenyu Diana Zhang,
 Shanshan Yang, and Chittibabu Pacharu. Microsoft.
 
-**arXiv preprint: coming soon.**
-
-<!-- Replace the placeholder with the arXiv URL and final bibliographic metadata after upload. -->
+**[arXiv:2609.20754](https://arxiv.org/abs/2609.20754)**
 
 ```bibtex
 @misc{zhang2026raft,
@@ -184,7 +188,10 @@ Shanshan Yang, and Chittibabu Pacharu. Microsoft.
   author = {Zhang, Mingxuan and Wang, Xiaowen and Sharan, Anupma and Chen, Zhengyi
             and Zhang, Chenyu Diana and Yang, Shanshan and Pacharu, Chittibabu},
   year   = {2026},
-  note   = {Accepted to EMNLP 2026, Industry Track. Preprint forthcoming.}
+  eprint = {2609.20754},
+  archivePrefix = {arXiv},
+  url    = {https://arxiv.org/abs/2609.20754},
+  note   = {Accepted to EMNLP 2026, Industry Track}
 }
 ```
 
