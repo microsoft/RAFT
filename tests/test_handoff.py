@@ -7,11 +7,11 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
-from agent_helpers import run_cases
+from agent_helpers import finish_review, run_cases
 from agents import Agent
 from pydantic import RootModel, ValidationError
-from test_extraction import case, edit, options
-from test_review import Review
+from test_extraction import case, edit
+from test_review import Review, options
 
 from raft import ExtractedCase, LocalRetriever, embed_cases
 from raft.defaults import CaseExtraction, format_case, state_to_text
@@ -276,7 +276,7 @@ async def test_failed_worker_attempt_does_not_duplicate_or_erase_notes(monkeypat
     assert record.execution["handoff_notes"] == [
         note_record("Committed."), note_record("Recovered.", 2, 1, 2),
     ]
-    assert len(record.execution["revisions"]) == 2
+    assert len(record.execution["revisions"]) == 3
     assert "Discard." not in json.dumps(record.execution["revisions"])
 
 
@@ -302,9 +302,8 @@ async def test_terminal_worker_failure_returns_only_successful_pass_records(monk
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("keep", [True, False])
-async def test_review_changes_state_without_changing_notes_or_adding_note_only_revision(monkeypatch, keep):
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state, write_handoff_note],
-                     output_type=Review)
+async def test_review_commits_assessment_without_changing_notes(monkeypatch, keep):
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state, write_handoff_note])
 
     async def run(agent, prompt, *, context, **kwargs):
         if agent is reviewer:
@@ -313,7 +312,7 @@ async def test_review_changes_state_without_changing_notes_or_adding_note_only_r
             assert not write(context, "Not permitted.")["ok"]
             # Mutating a detached view cannot change the committed history.
             context.pending_handoff_notes.clear()
-            response = Review(keep=keep, reason="Verified.")
+            response = finish_review(context, Review(keep=keep, reason="Verified."))
         else:
             write(context, "Verify this.")
             edit(context, [{"op": "add", "path": "", "value": {
@@ -329,13 +328,14 @@ async def test_review_changes_state_without_changing_notes_or_adding_note_only_r
     assert not result["failed_cases"]
     record = result["extracted_cases" if keep else "filtered_cases"][0]
     assert record.execution["handoff_notes"] == [note_record("Verify this.", 1, 0, 2)]
-    assert len(record.execution["revisions"]) == 1
+    assert len(record.execution["revisions"]) == 2
+    assert record.execution["revisions"][-1]["review"] == record.review.model_dump()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["timeout", "invalid_state", "unstructured"])
 async def test_failed_review_preserves_notes_and_worker_output(monkeypatch, failure):
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
 
     async def run(agent, prompt, *, context, **kwargs):
         if agent is reviewer:
@@ -362,7 +362,7 @@ async def test_failed_review_preserves_notes_and_worker_output(monkeypatch, fail
 
 @pytest.mark.asyncio
 async def test_review_retry_reads_same_full_history_without_repeating_worker(monkeypatch):
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
     calls = []
 
     async def run(agent, prompt, *, context, **kwargs):
@@ -371,7 +371,7 @@ async def test_review_retry_reads_same_full_history_without_repeating_worker(mon
             assert context.pending_handoff_notes == [note_record("Verify.", 1, 0, 2)]
             if calls.count("review") == 1:
                 raise TimeoutError("retry")
-            response = Review(keep=True, reason="done")
+            response = finish_review(context, Review(keep=True, reason="done"))
         else:
             write(context, "Verify.")
             edit(context, [{"op": "add", "path": "", "value": {

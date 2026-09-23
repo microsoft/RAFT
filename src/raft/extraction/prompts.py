@@ -41,6 +41,7 @@ def _review_prompt(
     metadata: dict[str, Any],
     output: Any,
     target_schema: dict[str, Any],
+    review_schema: dict[str, Any],
     worker_final_revision: int,
     coverage: dict[str, Any],
     handoff_notes: list[dict[str, Any]],
@@ -51,6 +52,8 @@ def _review_prompt(
         "output": output,
         "handoff_notes": handoff_notes,
         "target_output_schema": target_schema,
+        "review": {},
+        "review_output_schema": review_schema,
         "worker_final_revision": worker_final_revision,
         "coverage": coverage,
     })

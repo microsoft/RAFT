@@ -63,8 +63,10 @@ class _AgentRunner:
                 "Attach the defaults from raft.tools or custom tools "
                 "with these names that honor the CaseContext/review-correction contract."
             )
-        if agent.output_type is None or agent.output_type is str:
-            raise ValueError("Configure the reviewer's structured output_type on the Agent")
+        if agent.output_type is not None and agent.output_type is not str:
+            raise ValueError(
+                "Leave reviewer Agent.output_type unset; configure review_output_type on run_cases."
+            )
         return agent
 
     async def review(self, agent, prompt, **kwargs):

@@ -78,7 +78,6 @@ def build_pipeline(
         model_settings=ModelSettings(store=False),
         instructions=REVIEWER_PROMPT,
         tools=[query_case_sql, edit_state, lookup_error],
-        output_type=CaseReview,
     )
     return LocalPipeline(
         output_dir,
@@ -86,6 +85,7 @@ def build_pipeline(
             "worker_agent": worker,
             "reviewer_agent": reviewer,
             "output_type": SupportCase,
+            "review_output_type": CaseReview,
             "id_field": "id",
             "metadata_field": "metadata",
             "artifacts_field": "artifacts",

@@ -7,8 +7,8 @@ import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
 import pytest
+from agent_helpers import finish_review
 from agents import Agent
-from agents.agent_output import AgentOutputSchema
 from pydantic import ValidationError
 
 import raft.defaults as defaults
@@ -262,16 +262,15 @@ def test_review_rejects_missing_inconsistent_or_coerced_assessments(data):
 
 
 @pytest.mark.parametrize("keep", [True, False])
-def test_review_schema_works_as_strict_sdk_output(keep):
-    schema = AgentOutputSchema(CaseReview)
+def test_review_schema_validates_the_assessment_draft(keep):
     data = {
         "extractable": keep,
         "non_extractable_reasoning": None if keep else "The only artifact is an empty test event.",
     }
-    review = schema.validate_json(json.dumps(data))
+    review = CaseReview.model_validate_json(json.dumps(data))
     assert isinstance(review, CaseReview)
     assert review.model_dump() == data
-    assert schema.json_schema()["additionalProperties"] is False
+    assert CaseReview.model_json_schema()["additionalProperties"] is False
 
 
 def test_text_preparation_embeds_narratives_in_order_without_handoff_or_conclusions():
@@ -345,7 +344,7 @@ def test_prompts_have_role_focused_structure_and_moderate_length(instructions, s
     ]),
     (REVIEWER_INSTRUCTIONS, "overall_objective", "run_task", [
         "Review the supplied output as a whole", "correct it through edit_state",
-        "return a separate CaseReview assessment",
+        "write a separate CaseReview assessment into the review target",
     ]),
 ], ids=["worker", "reviewer"])
 def test_overall_objective_is_separate_from_current_role_assignment(
@@ -514,8 +513,9 @@ def test_final_reviewer_retains_useful_guidance_and_separates_assessment():
         "completed extraction after all worker passes",
         "worker_final_revision", "targeted source evidence or relevant state_revisions",
         "recover omitted information", "Notes are read-only",
-        "finish_pass=false", "final assessment completes the review",
-        "Return only the CaseReview fields", "partial troubleshooting, proposed fixes",
+        'target="case"', 'target="review"', "finish_pass=true",
+        "After pass_finished=true", "saved drafts, not your final text",
+        "Write these CaseReview fields into the review target", "partial troubleshooting, proposed fixes",
         "informational/advisory guidance", "successful resolution is not required",
         "content, not labels", "non_extractable_reasoning: null when extractable=true",
         "no usable technical insight", "set extractable=false",
@@ -549,7 +549,6 @@ async def test_defaults_complete_worker_passes_then_review_without_losing_state(
         name="reviewer",
         instructions=REVIEWER_INSTRUCTIONS,
         tools=[query_case_sql, edit_state],
-        output_type=CaseReview,
     )
     artifacts = [{"body": "Request for activation guidance."}, {"body": "No further data supplied."}]
     metadata = {"category": "RFI", "environment": "test"}
@@ -615,7 +614,7 @@ async def test_defaults_complete_worker_passes_then_review_without_losing_state(
                 }]),
             )
             assert corrected["ok"] and not corrected["pass_finished"]
-            result = CaseReview(**review_data)
+            result = finish_review(context, CaseReview(**review_data))
         return SimpleNamespace(new_items=[], final_output=result)
 
     monkeypatch.setattr(sdk.Runner, "run", run)
@@ -632,6 +631,7 @@ async def test_defaults_complete_worker_passes_then_review_without_losing_state(
         artifacts_field="artifacts",
         worker_agent=worker,
         reviewer_agent=reviewer,
+        review_output_type=CaseReview,
         output_type=CaseExtraction,
         should_keep=should_keep,
         batch_budget={"unit": "chars", "limit": max(len(json.dumps(a)) for a in artifacts)},

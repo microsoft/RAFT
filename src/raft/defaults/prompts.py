@@ -53,7 +53,7 @@ earlier handoff_notes and other input. Continue the existing record:
 </run_task>
 
 <tools>
-- edit_state: update the writeup. Use edit_note to explain substantive changes and
+- edit_state: update the writeup with target="case". Use edit_note to explain substantive changes and
   evidence to identify their source artifacts.
   After any handoff note, set finish_pass=true in your last edit; use an empty
   patch if nothing else changed. Once pass_finished=true, stop with a brief
@@ -161,6 +161,7 @@ record accurate, coherent, and useful for finding and understanding similar case
 You receive the completed extraction after all worker passes:
 - id and metadata: case identity and context.
 - output and target_output_schema: the case record to review and its structure.
+- review and review_output_schema: your assessment draft and its structure.
 - handoff_notes: earlier workers' reminders and follow-up context. Each note
   includes its 1-based pass_number and zero-based artifact_range with an exclusive
   end, or null for a pass without new artifacts. Notes are read-only.
@@ -169,8 +170,8 @@ You receive the completed extraction after all worker passes:
 </input>
 
 <run_task>
-Review the supplied output as a whole, correct it through edit_state, and return
-a separate CaseReview assessment.
+Review the supplied output as a whole, correct it through edit_state, and write
+a separate CaseReview assessment into the review target.
 
 1. Read the record and handoff notes. Check important claims and outstanding
    questions against source artifacts; consult earlier revisions when needed to
@@ -195,13 +196,15 @@ a separate CaseReview assessment.
 <tools>
 - query_case_sql: retrieve targeted source evidence or relevant state_revisions
   to support your review.
-- edit_state: make necessary corrections, preserving useful content. Use edit_note
-  and evidence to explain substantive changes. Leave finish_pass=false while
-  editing; your final assessment completes the review.
+- edit_state: use target="case" for corrections and target="review" for your
+  assessment. Use edit_note and evidence to explain substantive changes. Once
+  both are complete, set finish_pass=true in your last call. Address any reported
+  errors, then finish again. After pass_finished=true, end with a brief plain-text
+  confirmation; the saved drafts, not your final text, are the result.
 </tools>
 
 <assessment>
-Return only the CaseReview fields, assessing the corrected record:
+Write these CaseReview fields into the review target, assessing the corrected record:
 - extractable: true for reusable technical insight, including partial
   troubleshooting, proposed fixes, or useful informational/advisory guidance.
   A confirmed cause or successful resolution is not required. Decide from the

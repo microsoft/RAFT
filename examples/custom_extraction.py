@@ -4,7 +4,7 @@ The defaults use strings for entities and timeline entries. This example replace
 entity strings with categorized objects for filtering and knowledge-base lookup,
 while retaining the default timeline strings and worker/reviewer contracts.
 Use SupportCase as RAFT's output_type, not the worker Agent's output_type.
-The reviewer still returns the separate default CaseReview assessment.
+The reviewer writes a separate CaseReview assessment through edit_state.
 """
 
 from typing import Annotated, Literal

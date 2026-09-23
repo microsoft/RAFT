@@ -4,10 +4,10 @@ from collections import defaultdict
 from types import SimpleNamespace
 
 import pytest
-from agent_helpers import run_cases
+from agent_helpers import finish_review, run_cases
 from agents import Agent
-from test_extraction import case, edit, options
-from test_review import Review
+from test_extraction import case, edit
+from test_review import Review, options
 
 from raft.extraction import _agent as sdk
 from raft.extraction import runner
@@ -131,7 +131,7 @@ async def test_worker_passes_and_reviews_share_agent_budget(monkeypatch, agent_c
         if context._owns_writer:
             active_cases.remove(context.case_id)
 
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
 
     async def run(agent, prompt, *, context, **kwargs):
         nonlocal maximum_agents
@@ -145,7 +145,7 @@ async def test_worker_passes_and_reviews_share_agent_budget(monkeypatch, agent_c
             await asyncio.sleep(0.005)
             if agent is reviewer:
                 assert calls[identifier] == ["worker", "worker", "reviewer"]
-                value = Review(keep=True, reason="done")
+                value = finish_review(context, Review(keep=True, reason="done"))
             else:
                 assert edit(context, [{
                     "op": "add", "path": "", "value": {
@@ -182,7 +182,7 @@ async def test_retries_release_agent_slots_and_all_stages_count_toward_rpm(
 ):
     starts = []
     failed = False
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
 
     async def run(agent, prompt, *, context, **kwargs):
         nonlocal failed
@@ -192,7 +192,7 @@ async def test_retries_release_agent_slots_and_all_stages_count_toward_rpm(
             failed = True
             raise TimeoutError("temporary")
         if agent is reviewer:
-            value = Review(keep=True, reason="done")
+            value = finish_review(context, Review(keep=True, reason="done"))
         else:
             assert edit(context, [{
                 "op": "add", "path": "", "value": {"extractable": True, "timeline": []},
@@ -231,7 +231,7 @@ async def test_queue_timeout_does_not_record_an_invocation(monkeypatch):
         }])["ok"]
         return SimpleNamespace(new_items=[], final_output="done")
 
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
     monkeypatch.setattr(sdk.Runner, "run", run)
     result = await run_cases(
         cases=[case("a"), case("b")],

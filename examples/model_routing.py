@@ -9,9 +9,9 @@ roles. A callback can select by context.stage for separate worker/reviewer pools
 
 This example round-robins worker invocations and pins reviews to one model.
 It is not automatic failover or per-endpoint rate limiting; RAFT's limits still
-apply across the extraction call. All selected endpoints must support the tools
-and, for review, structured outputs. Use OpenAIChatCompletionsModel instead if
-an OpenAI-compatible endpoint supports Chat Completions but not Responses.
+apply across the extraction call. All selected endpoints must support tool
+calling; native structured final outputs are not required. Use
+OpenAIChatCompletionsModel if an endpoint supports Chat Completions but not Responses.
 
 index_with_model_pool is opt-in and makes billable calls. Set OPENAI_API_KEY,
 PRIMARY_MODEL, SECONDARY_BASE_URL, SECONDARY_API_KEY, and SECONDARY_MODEL in

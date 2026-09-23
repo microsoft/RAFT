@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from agents import RunContextWrapper, function_tool
 
@@ -20,9 +20,11 @@ async def query_case_sql(
 
     Tables:
     - artifacts(position, original_position, sort_value, char_count, artifact_json)
-    - state_revisions(revision_id, stage, pass_number, state_json, edits_json, handoff_notes_json):
+    - state_revisions(revision_id, stage, pass_number, state_json, edits_json,
+      handoff_notes_json, review_json):
       reviewer-only committed history. Workers cannot read this table.
-      state_json is a snapshot; edits_json is an array of {patch, edit_note, evidence}.
+      state_json is a case snapshot; edits_json contains {target, patch, edit_note, evidence}.
+      review_json is the committed assessment, or SQL NULL for a worker revision.
       handoff_notes_json contains the separately committed working notes for that revision.
       List revision IDs first, then select specific JSON fields or edits as needed.
       stage is worker/reviewer; reviewer pass_number is NULL. Failed drafts are absent.
@@ -47,34 +49,38 @@ async def edit_state(
     finish_pass: bool = False,
     edit_note: str | None = None,
     evidence: list[EvidenceReference] | None = None,
+    target: Literal["case", "review"] = "case",
 ) -> dict[str, Any]:
-    """Apply an RFC 6902 JSON Patch to the current draft state.
+    """Apply an RFC 6902 JSON Patch to the selected case or review draft.
 
     Apply all patch operations atomically, then validate the resulting draft
-    against the configured output model. Malformed patches, invalid paths, or
-    invalid evidence references return ok=false and error without changing state.
+    against its configured output model. Paths, including the root path "", are
+    relative to the selected target; copy/move cannot access the other draft.
+    The case target is always available; review requires a review context.
+    Unavailable targets, malformed patches, invalid paths, or invalid evidence
+    return ok=false and error without changing drafts.
     Create parent objects and arrays before adding nested fields or appending items.
 
     Incomplete drafts may be accepted with ok=true and state_valid=false.
     Validation errors block completion of the final batch; contexts requiring
-    validity on every edit also return ok=false for invalid drafts. The patch
-    remains applied in either case: repair the updated draft rather than replaying
-    the original patch.
+    strict case validity also return ok=false for invalid case edits. Assessment
+    drafts may be built incrementally. Applied patches remain in the draft after
+    validation errors: repair the updated draft rather than replaying the patch.
 
-    Set finish_pass=true to request completion of the current pass. Accepted
-    completion returns pass_finished=true and locks further edits; blocked
-    completion leaves the pass open for repair. An empty patch array checks or
-    finishes the unchanged draft. Finishing a pass does not necessarily finish the
-    case. The runner controls coverage, advancement, and committing the draft
-    and edit history.
+    Set finish_pass=true to request completion of the current invocation.
+    During review this validates BOTH case and review, regardless of target,
+    and locks both drafts only when valid. Otherwise completion remains open
+    for repair. An empty patch checks or finishes unchanged drafts. Accepted
+    completion returns pass_finished=true; subsequent edits to either target
+    are rejected. The runner commits completed drafts and their edit history.
 
     The response includes ok (request accepted, not necessarily valid state) and
-    error when rejected, including attempts to edit an already-finished pass.
+    target, plus error when rejected.
     After a patch is applied, it also includes:
     - patch_applied: True even if output-model validation blocks the request.
-    - state_valid: Whether the draft satisfies the configured output model.
+    - state_valid: Whether all drafts checked by this call satisfy their schemas.
     - validation_errors: Empty when valid; otherwise field paths (loc), error
-      types, messages (msg), offending input, and optional validation context.
+      types, messages (msg), offending input, target, and optional validation context.
     - operations_applied: Number of operations in the applied patch array.
     - pass_finished: Whether completion was accepted and further edits are locked.
     - is_final_batch: Whether the current batch is the last source batch.
@@ -86,7 +92,7 @@ async def edit_state(
         evidence: Optional supporting artifact positions and RFC 6901 JSON pointers.
             Empty json_pointer refers to the whole artifact. Locations are checked;
             a valid reference does not establish that the evidence supports the change.
-
+        target: Draft to edit: case (default) or review (only in a review context).
     """
     return apply_edit(
         context=ctx.context,
@@ -94,6 +100,7 @@ async def edit_state(
         finish_pass=finish_pass,
         edit_note=edit_note,
         evidence=evidence,
+        target=target,
     )
 
 

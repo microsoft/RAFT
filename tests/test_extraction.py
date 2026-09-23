@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from agent_helpers import REVIEWER, WorkerTestRunner, run_cases
+from agent_helpers import REVIEWER, ReviewResult, WorkerTestRunner, run_cases
 from agents import Agent, function_tool
 from pydantic import BaseModel, RootModel
 
@@ -32,6 +32,7 @@ def case(ticket="a", text="hello"):
 def options(**kwargs):
     return {
         "reviewer_agent": REVIEWER,
+        "review_output_type": ReviewResult,
         "_agent_runner": WorkerTestRunner(),
         "output_type": Output,
         "worker_agent": Agent(
@@ -191,10 +192,12 @@ async def test_worker_retry_resumes_committed_state_and_ranges(monkeypatch):
     result = await run_cases(cases=[case()], **options(retries=1, batch_budget={"unit": "chars", "limit": 31}))
     output = result["extracted_cases"][0]
     assert output.output.timeline == ["first", "second"]
-    assert [r["state"]["timeline"] for r in output.execution["revisions"]] == [
+    worker_revisions = [r for r in output.execution["revisions"] if r["stage"] == "worker"]
+    assert [r["state"]["timeline"] for r in worker_revisions] == [
         ["first"], ["first", "second"]
     ]
-    assert [r["revision_id"] for r in output.execution["revisions"]] == [1, 2]
+    assert [r["revision_id"] for r in worker_revisions] == [1, 2]
+    assert output.execution["revisions"][-1]["review"] == {"keep": True}
     assert (
         output.execution["passes"],
         output.execution["attempts"],

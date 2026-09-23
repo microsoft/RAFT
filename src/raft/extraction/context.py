@@ -51,6 +51,8 @@ class CaseContext:
     _database_uri: str = field(repr=False)
     _owns_writer: bool = field(default=True, repr=False)
     pending_state: Any = field(default_factory=dict)
+    pending_review: Any = field(default_factory=dict)
+    review_output_type: type[BaseModel] | None = None
     pending_edits: list[dict[str, Any]] = field(default_factory=list)
     _handoff_notes: tuple[HandoffNote, ...] = field(default_factory=tuple, repr=False)
     _pending_handoff_note: HandoffNote | None = field(default=None, repr=False)
@@ -79,6 +81,8 @@ class CaseContext:
         if source_range is not None and source_range.end_position_exclusive > len(self.artifact_char_counts):
             raise ValueError("artifact_range must reference supplied source positions")
         self.pending_state = copy.deepcopy(committed_state)
+        self.pending_review = {}
+        self.review_output_type = None
         self.pending_edits = []
         self._handoff_notes = notes
         self._pending_handoff_note = None
@@ -96,9 +100,10 @@ class CaseContext:
         return [record.model_dump(mode="json") for record in records]
 
     def for_review(
-        self, output: Any, *, handoff_notes: list[dict[str, Any]] | None = None
+        self, output: Any, *, review_output_type: type[BaseModel] | None = None,
+        handoff_notes: list[dict[str, Any]] | None = None,
     ) -> CaseContext:
-        """Create an isolated draft and reader; the case retains database ownership."""
+        """Create isolated case/review drafts and a reader; the case owns the database."""
         notes = validate_handoff_notes(
             self.pending_handoff_notes if handoff_notes is None else handoff_notes
         )
@@ -108,6 +113,8 @@ class CaseContext:
             _owns_writer=False,
             metadata=copy.deepcopy(self.metadata),
             pending_state=copy.deepcopy(output),
+            pending_review={},
+            review_output_type=review_output_type,
             pending_edits=[],
             _handoff_notes=notes,
             _pending_handoff_note=None,
@@ -119,7 +126,9 @@ class CaseContext:
             stage="reviewer",
         )
 
-    def commit_revision(self, state: Any, *, pass_number: int | None) -> None:
+    def commit_revision(
+        self, state: Any, *, pass_number: int | None, review: Any = None,
+    ) -> None:
         """Runner-only write after a successful invocation; never exposed as SQL."""
         notes = self.pending_handoff_notes
         if self._pending_handoff_note is not None and self.stage == "worker":
@@ -128,10 +137,10 @@ class CaseContext:
         with self._writer:
             self._writer.execute(
                 "INSERT INTO state_revisions "
-                "(stage, pass_number, state_json, edits_json, handoff_notes_json) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "(stage, pass_number, state_json, edits_json, handoff_notes_json, review_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (self.stage, pass_number, _to_json(state), _to_json(self.pending_edits),
-                 _to_json(notes)),
+                 _to_json(notes), _to_json(review) if self.stage == "reviewer" else None),
             )
 
     def revisions(self) -> list[dict[str, Any]]:
@@ -144,9 +153,11 @@ class CaseContext:
                 "state": json.loads(state),
                 "edits": json.loads(edits),
                 "handoff_notes": json.loads(notes),
+                **({"review": json.loads(review)} if review is not None else {}),
             }
-            for revision_id, stage, pass_number, state, edits, notes in self._writer.execute(
-                "SELECT revision_id, stage, pass_number, state_json, edits_json, handoff_notes_json "
+            for revision_id, stage, pass_number, state, edits, notes, review in self._writer.execute(
+                "SELECT revision_id, stage, pass_number, state_json, edits_json, "
+                "handoff_notes_json, review_json "
                 "FROM state_revisions ORDER BY revision_id"
             )
         ]
@@ -278,7 +289,8 @@ def _build_case_context(
                 pass_number INTEGER,
                 state_json TEXT NOT NULL,
                 edits_json TEXT NOT NULL,
-                handoff_notes_json TEXT NOT NULL
+                handoff_notes_json TEXT NOT NULL,
+                review_json TEXT
             )
             """
         )

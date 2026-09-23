@@ -64,6 +64,7 @@ async def run_cases(
     metadata_field: str,
     output_type: type[BaseModel],
     reviewer_agent: Agent[CaseContext],
+    review_output_type: type[BaseModel],
     should_keep: Callable[[ExtractedCase], bool] | None = None,
     artifact_sort_field: str | None = None,
     batch_budget: dict[str, Any] | None = None,
@@ -94,7 +95,9 @@ async def run_cases(
     All artifacts must be supplied before completion. Every successful output
     is retained. Each successful pass saves a revision. The required reviewer can
     query history and correct the output after all worker passes. Its draft is
-    committed only after a structured review and valid case state are returned.
+    and assessment are committed together after edit_state finishes the review.
+    output_type and review_output_type validate the separate case/review targets;
+    reviewer Agent.output_type must be unset. Final agent text is not parsed.
     should_keep receives the corrected ExtractedCase; False retains all fields
     in filtered_cases, including execution.revisions.
 
@@ -143,6 +146,8 @@ async def run_cases(
     agent_runner = _AgentRunner(run_config=run_config)
     if not isinstance(output_type, type) or not issubclass(output_type, BaseModel):
         raise ValueError("output_type must be a Pydantic model class")
+    if not isinstance(review_output_type, type) or not issubclass(review_output_type, BaseModel):
+        raise ValueError("review_output_type must be a Pydantic model class")
     agent = agent_runner.prepare(worker_agent)
     if reviewer_agent is None:
         raise ValueError("reviewer_agent is required")
@@ -250,6 +255,7 @@ async def run_cases(
                             metadata=context.metadata,
                             output=worker_state,
                             target_schema=output_type.model_json_schema(),
+                            review_schema=review_output_type.model_json_schema(),
                             worker_final_revision=progress.passes,
                             handoff_notes=progress.handoff_notes,
                             coverage=_coverage_payload(
@@ -257,7 +263,8 @@ async def run_cases(
                             ),
                         )
                         review_context = context.for_review(
-                            worker_state, handoff_notes=progress.handoff_notes
+                            worker_state, review_output_type=review_output_type,
+                            handoff_notes=progress.handoff_notes,
                         )
                         try:
                             async with scheduler.slot():
@@ -268,20 +275,27 @@ async def run_cases(
                                     "stage": "review",
                                     "rounds": telemetry.rounds,
                                 })
-                                candidate_review = await agent_runner.review(
+                                await agent_runner.review(
                                     reviewer, review_prompt,
                                     context=review_context,
                                     max_turns=max_turns,
                                     telemetry=telemetry,
                                 )
-                            if not isinstance(candidate_review, (BaseModel, dict)):
-                                raise ValueError("Reviewer must return a structured object")
+                            if not review_context.pass_finished:
+                                raise IncompletePassError(
+                                    "Reviewer ended without finishing the review through edit_state"
+                                )
                             candidate_output = output_type.model_validate(
-                                review_context.pending_state, by_name=True
+                                deepcopy(review_context.pending_state), by_name=True
+                            )
+                            candidate_review = review_output_type.model_validate(
+                                deepcopy(review_context.pending_review), by_name=True
                             )
                             corrected_state = candidate_output.model_dump(mode="json")
-                            if corrected_state != worker_state:
-                                review_context.commit_revision(corrected_state, pass_number=None)
+                            review_context.commit_revision(
+                                corrected_state, pass_number=None,
+                                review=candidate_review.model_dump(mode="json"),
+                            )
                             # No await between the journal commit and publishing the result.
                             progress.state = corrected_state
                             output, review = candidate_output, candidate_review

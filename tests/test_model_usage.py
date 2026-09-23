@@ -4,7 +4,7 @@ import json
 
 from agents import Agent, RunConfig
 from agents.models.interface import ModelProvider
-from test_execution import ScriptedModel, call, edit_call, message
+from test_execution import ScriptedModel, call, edit_call, message, review_call
 from test_openai_run_config import execution_options
 
 from raft import run_cases
@@ -36,7 +36,9 @@ async def test_five_passes_and_review_aggregate_only_by_model(tmp_path):
         return [step for i in passes for step in ([edit_call(str(i), f"edit-{i}")], [message("done")])]
 
     a = NamedModel("model-a", steps([0, 2, 4]))
-    b = NamedModel("model-b", [*steps([1, 3]), [message('{"keep":false}')]])
+    b = NamedModel("model-b", [
+        *steps([1, 3]), [review_call({"keep": False})], [message("Review complete.")],
+    ])
     selections = iter([a, b, a, b, a, b])
     result = await run_cases(**execution_options(
         ScriptedModel([]),
@@ -47,10 +49,10 @@ async def test_five_passes_and_review_aggregate_only_by_model(tmp_path):
     assert not result["failed_cases"], result
     record = result["filtered_cases"][0]
     assert record.execution["passes"] == 5
-    assert_usage(record, {"model-a": 6, "model-b": 5})
+    assert_usage(record, {"model-a": 6, "model-b": 6})
     save_json(tmp_path / "result.json", result)
     saved = json.loads((tmp_path / "result.json").read_text())["filtered_cases"][0]
-    assert_usage(saved, {"model-a": 6, "model-b": 5})
+    assert_usage(saved, {"model-a": 6, "model-b": 6})
 
 
 async def test_custom_provider_and_handoff_use_resolved_model_not_route_alias():
@@ -60,7 +62,9 @@ async def test_custom_provider_and_handoff_use_resolved_model_not_route_alias():
             self.models = {
                 "worker-route": NamedModel("worker-model", [[call("transfer_to_specialist", {}, "handoff")]]),
                 "specialist-route": NamedModel("specialist-model", [[edit_call("done", "edit")], [message("done")]]),
-                "review-route": NamedModel("review-model", [[message('{"keep":true}')]]),
+                "review-route": NamedModel("review-model", [
+                    [review_call()], [message("Review complete.")],
+                ]),
             }
 
         def get_model(self, name):
@@ -79,7 +83,7 @@ async def test_custom_provider_and_handoff_use_resolved_model_not_route_alias():
     result = await run_cases(**settings, run_config=config)
     assert not result["failed_cases"], result
     record = result["extracted_cases"][0]
-    assert_usage(record, {"worker-model": 1, "specialist-model": 2, "review-model": 1})
+    assert_usage(record, {"worker-model": 1, "specialist-model": 2, "review-model": 2})
     assert config.model_provider is provider
     assert worker.model == "worker-route"
     assert set(provider.calls) == {"worker-route", "specialist-route", "review-route"}
@@ -88,13 +92,16 @@ async def test_custom_provider_and_handoff_use_resolved_model_not_route_alias():
 async def test_failed_attempt_usage_is_kept_under_original_model(monkeypatch):
     monkeypatch.setattr("raft.extraction.runner._retry_delay", lambda *_: 0)
     first = NamedModel("first", [[edit_call("discard", "first-edit")], TimeoutError("retry")])
-    second = NamedModel("second", [[edit_call("done", "second-edit")], [message("done")], [message('{"keep":true}')]])
+    second = NamedModel("second", [
+        [edit_call("done", "second-edit")], [message("done")],
+        [review_call()], [message("Review complete.")],
+    ])
     selected = iter([first, second, second])
     result = await run_cases(**execution_options(
         None, retries=1, run_config=lambda *_: RunConfig(model=next(selected), tracing_disabled=True),
     ))
     assert not result["failed_cases"], result
-    assert_usage(result["extracted_cases"][0], {"first": 1, "second": 3})
+    assert_usage(result["extracted_cases"][0], {"first": 1, "second": 4})
 
 
 async def test_failed_case_retains_per_model_usage():
@@ -114,7 +121,8 @@ async def test_concurrent_cases_do_not_mix_model_usage():
 
     models = {
         str(i): YieldingModel(f"model-{i}", [
-            [edit_call(str(i), f"edit-{i}")], [message("done")], [message('{"keep":true}')],
+            [edit_call(str(i), f"edit-{i}")], [message("done")],
+            [review_call()], [message("Review complete.")],
         ]) for i in range(4)
     }
     result = await run_cases(**execution_options(
@@ -124,4 +132,4 @@ async def test_concurrent_cases_do_not_mix_model_usage():
     ))
     assert not result["failed_cases"], result
     for case in result["extracted_cases"]:
-        assert_usage(case, {f"model-{case.id}": 3})
+        assert_usage(case, {f"model-{case.id}": 4})

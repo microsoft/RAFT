@@ -2,10 +2,11 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from agent_helpers import run_cases
+from agent_helpers import finish_review, run_cases
 from agents import Agent
 from pydantic import BaseModel
-from test_extraction import case, edit, options
+from test_extraction import case, edit
+from test_extraction import options as extraction_options
 from test_local_pipeline import pipeline, raw
 
 from raft.cases import ExtractedCase, restore_case
@@ -20,10 +21,16 @@ class Review(BaseModel):
     reason: str
 
 
+def options(**kwargs):
+    if "reviewer_agent" in kwargs:
+        kwargs.setdefault("review_output_type", Review)
+    return extraction_options(**kwargs)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("keep", [True, False])
 async def test_complete_review_and_filter_preserve_fields(monkeypatch, keep):
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
     passes = []
     seen = []
 
@@ -38,7 +45,7 @@ async def test_complete_review_and_filter_preserve_fields(monkeypatch, keep):
             assert context.query("select count(*) as n from state_revisions")["rows"] == [
                 {"n": len(passes)}
             ]
-            result = Review(keep=keep, reason="All evidence reviewed")
+            result = finish_review(context, Review(keep=keep, reason="All evidence reviewed"))
         else:
             passes.append(str(len(passes)))
             assert edit(
@@ -73,7 +80,8 @@ async def test_complete_review_and_filter_preserve_fields(monkeypatch, keep):
     assert record.output.timeline == passes
     assert record.review.reason == "All evidence reviewed"
     assert record.execution["passes"] == len(passes)
-    assert len(record.execution["revisions"]) == len(passes)
+    assert len(record.execution["revisions"]) == len(passes) + 1
+    assert record.execution["revisions"][-1]["review"] == record.review.model_dump()
     saved = record.model_dump(mode="json")
     restored = restore_case(saved, type(record.output))
     assert restored.model_dump(mode="json") == saved
@@ -81,7 +89,7 @@ async def test_complete_review_and_filter_preserve_fields(monkeypatch, keep):
 
 @pytest.mark.asyncio
 async def test_review_retry_does_not_repeat_worker(monkeypatch):
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
     calls = []
 
     async def run(agent, prompt, *, context, **kwargs):
@@ -89,7 +97,7 @@ async def test_review_retry_does_not_repeat_worker(monkeypatch):
         if agent is reviewer:
             if calls.count("review") == 1:
                 raise TimeoutError("temporary")
-            result = Review(keep=True, reason="done")
+            result = finish_review(context, Review(keep=True, reason="done"))
         else:
             assert edit(
                 context,
@@ -141,7 +149,7 @@ def test_default_handoff_notes_independent():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("review_value", ["unstructured", None])
 async def test_invalid_review_keeps_worker_in_failure_and_never_filters(monkeypatch, review_value):
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
 
     async def run(agent, prompt, *, context, **kwargs):
         if agent is not reviewer:
@@ -251,7 +259,7 @@ async def test_reviewer_registration_checked_before_processing(monkeypatch, tool
         pytest.fail("SDK must not run when required reviewer tools are missing")
 
     monkeypatch.setattr(sdk.Runner, "run", unexpected_run)
-    reviewer = Agent(name="review", tools=tools, output_type=Review)
+    reviewer = Agent(name="review", tools=tools)
     with pytest.raises(ValueError, match=f"reviewer_agent.tools is missing required tools: {missing}\\."):
         await run_cases(cases=[case()], **options(reviewer_agent=reviewer))
     assert reviewer.tools == tools
@@ -259,8 +267,10 @@ async def test_reviewer_registration_checked_before_processing(monkeypatch, tool
 
 @pytest.mark.asyncio
 async def test_reviewer_native_output_is_checked():
-    with pytest.raises(ValueError, match="output_type"):
+    with pytest.raises(ValueError, match="review_output_type"):
         await run_cases(
             cases=[],
-            **options(reviewer_agent=Agent(name="review", tools=[query_case_sql, edit_state])),
+            **options(reviewer_agent=Agent(
+                name="review", tools=[query_case_sql, edit_state], output_type=Review,
+            )),
         )

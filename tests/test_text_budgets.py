@@ -88,7 +88,7 @@ async def test_token_sql_response_budget_counts_complete_json_and_review(encodin
     class Backend(ExtractionBackend):
         async def review(self, agent, prompt, *, context, **kwargs):
             check(context)
-            return {"keep": True}
+            return await super().review(agent, prompt, context=context, **kwargs)
 
     def handler(context, prompt, count):
         check(context)

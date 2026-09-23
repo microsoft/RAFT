@@ -2,12 +2,13 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from agent_helpers import finish_review
 from agents import Agent, RunConfig
-from test_execution import ScriptedModel, check_usage, edit_call, message
+from test_execution import ScriptedModel, check_usage, edit_call, message, review_call
 from test_execution import options as _execution_options
 from test_extraction import case, edit
-from test_extraction import options as _options
 from test_review import Review
+from test_review import options as _options
 
 from raft import run_cases
 from raft.extraction import _agent as sdk
@@ -40,7 +41,7 @@ async def test_default_and_static_config_cover_worker_and_reviewer(monkeypatch, 
         trace_include_sensitive_data=False, workflow_name="custom-workflow",
     ) if custom else None
     observed = []
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
 
     async def run(agent, prompt, *, context, max_turns, hooks, run_config):
         observed.append(run_config)
@@ -55,7 +56,7 @@ async def test_default_and_static_config_cover_worker_and_reviewer(monkeypatch, 
         else:
             assert run_config.tracing_disabled and run_config.model is None
         if agent is reviewer:
-            value = Review(keep=True, reason="done")
+            value = finish_review(context, Review(keep=True, reason="done"))
         else:
             finish_worker(context)
             value = "done"
@@ -77,7 +78,7 @@ async def test_default_and_static_config_cover_worker_and_reviewer(monkeypatch, 
 async def test_callback_selects_fresh_config_for_passes_review_and_retry(monkeypatch, asynchronous):
     selected = []
     observed = []
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
     worker = options()["worker_agent"]
 
     def configure(agent, context):
@@ -96,7 +97,7 @@ async def test_callback_selects_fresh_config_for_passes_review_and_retry(monkeyp
         if agent is reviewer:
             if len(observed) == 3:
                 raise TimeoutError("retry this review")
-            value = Review(keep=True, reason="done")
+            value = finish_review(context, Review(keep=True, reason="done"))
         else:
             finish_worker(context)
             value = "done"
@@ -128,7 +129,9 @@ async def test_real_sdk_concurrent_routing_keeps_choice_across_model_turns():
         str(i): YieldingModel([[edit_call(str(i), "edit")], [message("done")]])
         for i in range(4)
     }
-    review_models = {str(i): YieldingModel([[message('{"keep":true}')]]) for i in range(4)}
+    review_models = {
+        str(i): YieldingModel([[review_call()], [message("Review complete.")]]) for i in range(4)
+    }
     selected = []
 
     async def configure(agent, context):
@@ -151,7 +154,7 @@ async def test_real_sdk_concurrent_routing_keeps_choice_across_model_turns():
     assert [item.output.text for item in result["extracted_cases"]] == [str(i) for i in range(4)]
     assert settings["worker_agent"].model is unused_model
     for item in result["extracted_cases"]:
-        check_usage(item.execution, 3)
+        check_usage(item.execution, 4)
         assert item.execution["tool_calls"][0]["rounds"][0]["calls"][0]["name"] == "edit_state"
 
 
@@ -184,7 +187,7 @@ async def test_pipeline_passes_native_run_config_to_both_agents(tmp_path):
 
     model = ScriptedModel([
         [edit_call("extracted", "edit")], [message("done")],
-        [message('{"keep":true}')],
+        [review_call()], [message("Review complete.")],
     ])
     supplied = RunConfig(model=model, tracing_disabled=True)
     settings = execution_options(ScriptedModel([]), run_config=supplied)
@@ -200,8 +203,8 @@ async def test_pipeline_passes_native_run_config_to_both_agents(tmp_path):
     case = result["indexed_cases"][0]["case"]
     assert case.output.text == "extracted"
     assert case.review.keep
-    # Two worker turns and one reviewer turn use the supplied model override.
-    check_usage(case.execution, 3)
+    # Both worker and reviewer tool/final turns use the supplied model override.
+    check_usage(case.execution, 4)
 
 
 async def test_removed_backend_parameter_is_rejected():

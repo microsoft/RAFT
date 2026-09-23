@@ -6,13 +6,13 @@ import sqlite3
 from types import SimpleNamespace
 
 import pytest
-from agent_helpers import run_cases
+from agent_helpers import finish_review, run_cases
 from agents import Agent
 from jsonpath import patch as json_patch
 from pydantic import RootModel
-from test_extraction import Output, case, edit, options
+from test_extraction import Output, case, edit
 from test_query_limits import case_context
-from test_review import Review
+from test_review import Review, options
 
 from raft.cases import restore_case
 from raft.extraction import _agent as sdk
@@ -127,7 +127,7 @@ def test_evidence_supports_whole_artifacts_escaped_keys_and_array_items():
 async def test_reviewer_recovers_deleted_content_and_filter_sees_corrected_state(
     monkeypatch, tmp_path, keep,
 ):
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
 
     async def run(agent, prompt, *, context, **kwargs):
         if agent is reviewer:
@@ -148,9 +148,9 @@ async def test_reviewer_recovers_deleted_content_and_filter_sees_corrected_state
                 edit_note="Restore the earlier observation after checking the source",
                 evidence=[EvidenceReference(artifact_position=0, json_pointer="/text")],
             )["ok"]
-            assert not context.pass_finished  # Structured response completes review.
+            assert not context.pass_finished
             assert context.query("SELECT count(*) AS n FROM state_revisions")["rows"] == [{"n": 2}]
-            response = Review(keep=keep, reason="Corrected chronology")
+            response = finish_review(context, Review(keep=keep, reason="Corrected chronology"))
         else:
             payload = json.loads(prompt.split("Pass context:\n")[1])
             assert "error" in context.query("SELECT * FROM state_revisions")
@@ -188,7 +188,7 @@ async def test_reviewer_recovers_deleted_content_and_filter_sees_corrected_state
 
 @pytest.mark.parametrize("failure", ["timeout", "unstructured", "invalid_state"])
 async def test_failed_review_never_commits_edits_or_filters(monkeypatch, failure):
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
 
     async def run(agent, prompt, *, context, **kwargs):
         if agent is not reviewer:
@@ -226,7 +226,7 @@ async def test_failed_review_never_commits_edits_or_filters(monkeypatch, failure
 
 
 async def test_review_retry_starts_clean_and_commits_once(monkeypatch):
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
     calls = []
     drafts = []
 
@@ -237,10 +237,11 @@ async def test_review_retry_starts_clean_and_commits_once(monkeypatch):
             assert context.pending_state["timeline"] == ["worker"]
             assert context.pending_edits == [] and not context.pass_finished
             assert context.query("SELECT count(*) AS n FROM state_revisions")["rows"] == [{"n": 1}]
-            assert edit(context, [{"op": "add", "path": "/timeline/-", "value": "review"}])["ok"]
+            assert edit(context, [{"op": "add", "path": "/timeline/-", "value": "review"}],
+                        finish=False)["ok"]
+            response = finish_review(context, Review(keep=True, reason="done"))
             if len(drafts) == 1:
                 raise TimeoutError("SDK failed after finishing edits")
-            response = Review(keep=True, reason="done")
         else:
             edit(context, [{"op": "add", "path": "", "value": {
                 "extractable": True, "timeline": ["worker"],
@@ -264,13 +265,17 @@ async def test_review_retry_starts_clean_and_commits_once(monkeypatch):
 
 
 async def test_cancellation_during_review_closes_both_readers_and_writer(monkeypatch):
-    reviewer = Agent(name="review", tools=[query_case_sql, edit_state], output_type=Review)
+    reviewer = Agent(name="review", tools=[query_case_sql, edit_state])
     entered = asyncio.Event()
     contexts = []
 
     async def run(agent, prompt, *, context, **kwargs):
         contexts.append(context)
         if agent is reviewer:
+            assert edit(context, [{
+                "op": "add", "path": "/timeline/-", "value": "uncommitted",
+            }], finish=False)["ok"]
+            finish_review(context, Review(keep=False, reason="Uncommitted assessment"))
             entered.set()
             await asyncio.Event().wait()
         edit(context, [{"op": "add", "path": "", "value": {
@@ -282,6 +287,8 @@ async def test_cancellation_during_review_closes_both_readers_and_writer(monkeyp
     task = asyncio.create_task(run_cases(cases=[case()], **options(reviewer_agent=reviewer)))
     try:
         await asyncio.wait_for(entered.wait(), timeout=5)
+        assert len(contexts[-1].revisions()) == 1
+        assert contexts[-1].revisions()[0]["state"]["timeline"] == []
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

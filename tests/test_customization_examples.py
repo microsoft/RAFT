@@ -7,7 +7,7 @@ import pytest
 from agents import Agent
 from agents.tool_context import ToolContext
 from pydantic import ValidationError
-from test_execution import ScriptedModel, call, message
+from test_execution import ScriptedModel, call, message, review_call
 from test_local_pipeline import Embeddings
 
 from examples import model_routing
@@ -184,9 +184,10 @@ async def test_custom_pipeline_real_sdk_passes_retrieval_and_reopen(tmp_path, st
     })
     first = ScriptedModel(worker_steps(initial, "Check certificate validity."))
     second = ScriptedModel(worker_steps(state, "Validity checked; rotation resolved the case."))
-    reviewer = ScriptedModel([[message(
-        '{"extractable":true,"non_extractable_reasoning":null}'
-    )]])
+    reviewer = ScriptedModel([
+        [review_call({"extractable": True, "non_extractable_reasoning": None})],
+        [message("Review complete.")],
+    ])
     unused = ScriptedModel([])
     backend = Embeddings()
     pipeline = build_pipeline(
@@ -198,7 +199,8 @@ async def test_custom_pipeline_real_sdk_passes_retrieval_and_reopen(tmp_path, st
     worker_agent = pipeline.extraction["worker_agent"]
     review_agent = pipeline.extraction["reviewer_agent"]
     assert worker_agent.output_type is None
-    assert review_agent.output_type is CaseReview
+    assert review_agent.output_type is None
+    assert pipeline.extraction["review_output_type"] is CaseReview
     assert [tool.name for tool in worker_agent.tools] == [
         "query_case_sql", "edit_state", "write_handoff_note", "lookup_error",
     ]

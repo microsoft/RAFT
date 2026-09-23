@@ -22,8 +22,9 @@ def test_sdk_tool_description_is_role_neutral_and_includes_output_contract():
     ):
         assert field in description
     assert set(edit_state.params_json_schema["properties"]) == {
-        "patch_json", "finish_pass", "edit_note", "evidence",
+        "patch_json", "finish_pass", "edit_note", "evidence", "target",
     }
+    assert edit_state.params_json_schema["properties"]["target"]["enum"] == ["case", "review"]
 
 
 class Output(BaseModel):
@@ -41,7 +42,9 @@ def draft(model=Output, *, final=False, reviewer=False, state=None):
         artifact_sort_field=None, final_output_type=model,
     )
     context.begin_pass({} if state is None else state, is_final_batch=final)
-    review_context = context.for_review(context.pending_state) if reviewer else None
+    review_context = context.for_review(
+        context.pending_state, review_output_type=RootModel[dict],
+    ) if reviewer else None
     try:
         yield review_context or context
     finally:
@@ -86,7 +89,8 @@ def test_valid_worker_edits_report_validity_and_allow_finishing(final, finish):
             {"op": "add", "path": "", "value": {"title": "Confirmed finding", "count": 1}}
         ], finish=finish)
         assert result == {
-            "ok": True, "patch_applied": True, "state_valid": True, "validation_errors": [],
+            "ok": True, "target": "case",
+            "patch_applied": True, "state_valid": True, "validation_errors": [],
             "operations_applied": 1, "pass_finished": finish, "is_final_batch": final,
         }
 

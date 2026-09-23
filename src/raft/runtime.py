@@ -58,7 +58,7 @@ async def map_concurrent(
 
 
 class IncompletePassError(Exception):
-    """The worker stopped before committing through edit_state."""
+    """An agent stopped without finishing its invocation through edit_state."""
 
 
 class PassLimitError(Exception):

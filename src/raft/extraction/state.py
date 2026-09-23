@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
-from typing import Any
+from typing import Any, Literal
 
 from jsonpath import JSONPatchError
 from jsonpath import patch as json_patch
@@ -56,9 +56,24 @@ def apply_edit(
     finish_pass: bool = False,
     edit_note: str | None = None,
     evidence: list[EvidenceReference] | None = None,
+    target: Literal["case", "review"] = "case",
 ) -> dict[str, Any]:
+    if target not in ("case", "review"):
+        return {"ok": False, "target": target, "error": "target must be 'case' or 'review'."}
+    if target == "review" and context.stage != "reviewer":
+        return {
+            "ok": False, "target": target,
+            "error": "The review target is only available during review.",
+        }
+    if context.stage == "reviewer" and context.review_output_type is None and (
+        target == "review" or finish_pass
+    ):
+        return {
+            "ok": False, "target": target,
+            "error": "Configure review_output_type before editing or finishing a review.",
+        }
     if context.pass_finished:
-        return {"ok": False, "error": "This pass has already been finished."}
+        return {"ok": False, "target": target, "error": "This pass has already been finished."}
 
     try:
         references = _evidence_metadata(context, evidence or [])
@@ -67,7 +82,8 @@ def apply_edit(
             raise ValueError("patch_json must encode a JSON array")
         # The patch engine can mutate an operation's value when later operations
         # edit that newly added object. Keep the original operations for history.
-        updated_state = json_patch.patched(deepcopy(operations), context.pending_state)
+        draft = context.pending_state if target == "case" else context.pending_review
+        updated_state = json_patch.patched(deepcopy(operations), draft)
     except (
         json.JSONDecodeError,
         JSONPatchError,
@@ -76,29 +92,43 @@ def apply_edit(
         KeyError,
         IndexError,
     ) as exc:
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "target": target, "error": str(exc)}
 
-    context.pending_state = updated_state
+    if target == "case":
+        context.pending_state = updated_state
+    else:
+        context.pending_review = updated_state
     context.pending_edits.append({
-        "patch": operations, "edit_note": edit_note, "evidence": references
+        "target": target, "patch": operations, "edit_note": edit_note, "evidence": references
     })
 
     validation_errors = []
-    try:
-        # Validation feedback must not let custom validators mutate the editable draft.
-        context.final_output_type.model_validate(deepcopy(updated_state), by_name=True)
-    except ValidationError as exc:
-        # Custom validator errors can contain exception objects in their context.
-        validation_errors = json.loads(exc.json(include_url=False))
+    models = {"case": context.final_output_type}
+    if context.stage == "reviewer" and context.review_output_type is not None:
+        models["review"] = context.review_output_type
+    targets = ("case", "review") if context.stage == "reviewer" and finish_pass else (target,)
+    for checked_target in targets:
+        draft = context.pending_state if checked_target == "case" else context.pending_review
+        try:
+            # Validation must not mutate either editable draft.
+            models[checked_target].model_validate(deepcopy(draft), by_name=True)
+        except ValidationError as exc:
+            # Custom validator errors can contain exception objects in their context.
+            validation_errors.extend(
+                {**error, "target": checked_target}
+                for error in json.loads(exc.json(include_url=False))
+            )
 
     blocked = bool(validation_errors) and (
-        context.stage == "reviewer" or (finish_pass and context.is_final_batch)
+        (context.stage == "reviewer" and target == "case")
+        or (finish_pass and (context.stage == "reviewer" or context.is_final_batch))
     )
     if finish_pass and not blocked:
         context.pass_finished = True
 
     result = {
         "ok": not blocked,
+        "target": target,
         "patch_applied": True,
         "state_valid": not validation_errors,
         "validation_errors": validation_errors,
@@ -107,5 +137,5 @@ def apply_edit(
         "is_final_batch": context.is_final_batch,
     }
     if blocked:
-        result["error"] = "Final state validation failed."
+        result["error"] = "Draft validation failed; repair the targets listed in validation_errors."
     return result

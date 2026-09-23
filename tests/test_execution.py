@@ -5,7 +5,7 @@ import json
 from ast import literal_eval
 
 import pytest
-from agent_helpers import REVIEWER, WorkerTestRunner, run_cases
+from agent_helpers import REVIEWER, ReviewResult, WorkerTestRunner, run_cases
 from agents import Agent, RunContextWrapper, function_tool
 from agents.items import ModelResponse
 from agents.models.interface import Model, ModelTracing
@@ -78,6 +78,7 @@ class ScriptedModel(Model):
 def options(model, tools=(), **kwargs):
     return {
         "reviewer_agent": REVIEWER,
+        "review_output_type": ReviewResult,
         "_agent_runner": WorkerTestRunner(),
         "cases": [{"id": "case", "meta": {}, "items": [{"text": "a"}, {"text": "b"}]}],
         "output_type": Output,
@@ -157,6 +158,20 @@ def edit_call(text, identifier):
         "edit_state",
         {
             "patch_json": json.dumps([{"op": "add", "path": "", "value": {"text": text}}]),
+            "finish_pass": True,
+        },
+        identifier,
+    )
+
+
+def review_call(value=None, identifier="review"):
+    return call(
+        "edit_state",
+        {
+            "target": "review",
+            "patch_json": json.dumps([{
+                "op": "add", "path": "", "value": {"keep": True} if value is None else value,
+            }]),
             "finish_pass": True,
         },
         identifier,
@@ -398,12 +413,12 @@ async def test_native_output_schema_and_guardrail_preserved_separately_from_extr
     assert worker.output_guardrails == [validate_completion]
 
 
-async def test_real_sdk_reviewer_queries_history_repairs_draft_and_returns_structured_review():
+async def test_real_sdk_reviewer_queries_history_repairs_draft_and_edits_assessment():
     class Assessment(BaseModel):
         keep: bool
 
     reviewer = Agent(
-        name="reviewer", output_type=Assessment, tools=[query_case_sql, edit_state],
+        name="reviewer", tools=[query_case_sql, edit_state],
         model=ScriptedModel([
             [call("query_case_sql", {
                 "query": "SELECT json_extract(state_json, '$.text') AS text FROM state_revisions"
@@ -416,12 +431,14 @@ async def test_real_sdk_reviewer_queries_history_repairs_draft_and_returns_struc
                 "edit_note": "Corrected using original evidence",
                 "evidence": [{"artifact_position": 0, "json_pointer": "/text"}],
             }, "repair")],
-            [message('{"keep":false}')],
+            [review_call({"keep": False})],
+            [message("Review complete.")],
         ]),
     )
     worker_model = ScriptedModel([[edit_call("worker", "worker-edit")], [message("done")]])
     result = await run_cases(**options(
-        worker_model, reviewer_agent=reviewer, should_keep=lambda record: record.review.keep,
+        worker_model, reviewer_agent=reviewer, review_output_type=Assessment,
+        should_keep=lambda record: record.review.keep,
     ))
     assert not result["failed_cases"], result
     record = result["filtered_cases"][0]
@@ -429,7 +446,8 @@ async def test_real_sdk_reviewer_queries_history_repairs_draft_and_returns_struc
     assert isinstance(record.review, Assessment) and not record.review.keep
     history = record.execution["revisions"]
     assert [r["state"]["text"] for r in history] == ["worker", "corrected"]
-    assert len(history[1]["edits"]) == 2  # The invalid draft patch was applied, then repaired.
+    assert [edit["target"] for edit in history[1]["edits"]] == ["case", "case", "review"]
+    assert history[1]["review"] == {"keep": False}
     assert history[1]["edits"][1]["evidence"] == [
         {"artifact_position": 0, "json_pointer": "/text"}
     ]
@@ -512,18 +530,20 @@ async def test_real_sdk_handoff_tool_carries_pass_records_and_rejects_reviewer_w
     ])
     reviewer = Agent(
         name="reviewer", tools=[query_case_sql, edit_state, write_handoff_note],
-        output_type=Assessment,
         model=NotesModel([
             [call("query_case_sql", {
                 "query": "SELECT handoff_notes_json FROM state_revisions ORDER BY revision_id",
             }, "notes-history")],
             [call("write_handoff_note", {"note": "Not allowed."}, "review-note")],
-            [edit_call("reviewed", "review-edit")],
-            [message('{"keep":true}')],
+            [call("edit_state", {
+                "patch_json": '[{"op":"replace","path":"/text","value":"reviewed"}]',
+            }, "review-edit")],
+            [review_call()],
+            [message("Review complete.")],
         ]),
     )
     result = await run_cases(**options(
-        worker, tools=[write_handoff_note], reviewer_agent=reviewer,
+        worker, tools=[write_handoff_note], reviewer_agent=reviewer, review_output_type=Assessment,
         batch_budget={"unit": "chars", "limit": 13},
     ))
     assert not result["failed_cases"], result["failed_cases"]
