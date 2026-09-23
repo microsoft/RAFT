@@ -53,6 +53,8 @@ earlier handoff_notes and other input. Continue the existing record:
 </run_task>
 
 <tools>
+- read_state: inspect the live case draft or a specific field when needed
+  between edits or before finishing.
 - edit_state: update the writeup with target="case". Use edit_note to explain substantive changes and
   evidence to identify their source artifacts.
   After any handoff note, set finish_pass=true in your last edit; use an empty
@@ -194,6 +196,8 @@ a separate CaseReview assessment into the review target.
 </run_task>
 
 <tools>
+- read_state: inspect the current case or review draft when needed between edits
+  or before finishing.
 - query_case_sql: retrieve targeted source evidence or relevant state_revisions
   to support your review.
 - edit_state: use target="case" for corrections and target="review" for your

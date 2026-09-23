@@ -8,7 +8,7 @@ from agents import RunContextWrapper, function_tool
 
 from raft.extraction.context import CaseContext
 from raft.extraction.handoff import apply_handoff_note
-from raft.extraction.state import EvidenceReference, apply_edit
+from raft.extraction.state import EvidenceReference, apply_edit, read_draft
 
 
 @function_tool
@@ -40,6 +40,36 @@ async def query_case_sql(
         query: A single read-only SELECT or WITH query.
     """
     return ctx.context.query(query)
+
+
+@function_tool
+async def read_state(
+    ctx: RunContextWrapper[CaseContext],
+    target: Literal["case", "review"] = "case",
+    json_pointer: str = "",
+) -> dict[str, Any]:
+    """Read the live case or review draft, or a selected value within it.
+
+    Use after edits to inspect the current draft, including incomplete or invalid
+    values. Reads do not validate, edit, finish, or commit anything and remain
+    available after completion. The case target is always readable; review
+    requires a review context.
+
+    Paths use RFC 6901 JSON Pointer: "" selects the entire target, "/timeline"
+    selects a field, and "/timeline/0" selects its first item. Escape literal ~
+    and / in keys as ~0 and ~1. Array indices are zero-based; "-" cannot be read.
+
+    Returns ok, target, json_pointer, and a detached value on success, including
+    null when that is the stored value. An unavailable target, invalid pointer,
+    or missing path returns ok=false and error without a value. Returned values
+    are complete, not truncated. Request a specific path to limit response size.
+    To observe an edit's result, call this after that edit has completed.
+
+    Args:
+        target: Draft to read: case (default) or review (only in a review context).
+        json_pointer: Path within the selected draft; empty reads the entire draft.
+    """
+    return read_draft(context=ctx.context, target=target, json_pointer=json_pointer)
 
 
 @function_tool

@@ -21,32 +21,68 @@ class EvidenceReference(BaseModel):
     json_pointer: str = Field(default="", description="RFC 6901 pointer; empty means whole artifact")
 
 
+def _resolve_pointer(value: Any, pointer: str) -> Any:
+    if not isinstance(pointer, str) or (
+        pointer and (not pointer.startswith("/") or re.search(r"~(?![01])", pointer))
+    ):
+        raise ValueError("json_pointer must be an RFC 6901 JSON pointer")
+    if not pointer:
+        return value
+    for token in pointer[1:].split("/"):
+        token = token.replace("~1", "/").replace("~0", "~")
+        if isinstance(value, list):
+            if not re.fullmatch(r"0|[1-9][0-9]*", token):
+                raise ValueError(f"Invalid array index in json_pointer: {pointer}")
+            index = int(token)
+            if index >= len(value):
+                raise ValueError(f"json_pointer does not resolve: {pointer}")
+            value = value[index]
+        elif isinstance(value, dict) and token in value:
+            value = value[token]
+        else:
+            raise ValueError(f"json_pointer does not resolve: {pointer}")
+    return value
+
+
 def _evidence_metadata(context: CaseContext, evidence: list[EvidenceReference]) -> list[dict]:
     references = []
     for value in evidence:
         reference = EvidenceReference.model_validate(value)
-        pointer = reference.json_pointer
-        if pointer and (not pointer.startswith("/") or re.search(r"~(?![01])", pointer)):
-            raise ValueError("json_pointer must be an RFC 6901 JSON pointer")
         row = context.connection.execute(
             "SELECT artifact_json FROM artifacts WHERE position = ?", (reference.artifact_position,)
         ).fetchone()
         if row is None:
             raise ValueError(f"Unknown artifact_position: {reference.artifact_position}")
-        if pointer:
-            current = json.loads(row[0])
-            for token in pointer[1:].split("/"):
-                token = token.replace("~1", "/").replace("~0", "~")
-                if isinstance(current, list):
-                    if not re.fullmatch(r"0|[1-9][0-9]*", token):
-                        raise ValueError(f"Invalid array index in json_pointer: {pointer}")
-                    current = current[int(token)]
-                elif isinstance(current, dict):
-                    current = current[token]
-                else:
-                    raise ValueError(f"json_pointer does not resolve: {pointer}")
+        _resolve_pointer(json.loads(row[0]), reference.json_pointer)
         references.append(reference.model_dump(mode="json"))
     return references
+
+
+def read_draft(
+    *,
+    context: CaseContext,
+    target: Literal["case", "review"] = "case",
+    json_pointer: str = "",
+) -> dict[str, Any]:
+    response = {"target": target, "json_pointer": json_pointer}
+    if target not in ("case", "review"):
+        return {**response, "ok": False, "error": "target must be 'case' or 'review'."}
+    if target == "review" and context.stage != "reviewer":
+        return {
+            **response, "ok": False,
+            "error": "The review target is only available during review.",
+        }
+    if target == "review" and context.review_output_type is None:
+        return {
+            **response, "ok": False,
+            "error": "Configure review_output_type before reading a review.",
+        }
+    draft = context.pending_state if target == "case" else context.pending_review
+    try:
+        value = _resolve_pointer(draft, json_pointer)
+    except ValueError as exc:
+        return {**response, "ok": False, "error": str(exc)}
+    return {**response, "ok": True, "value": deepcopy(value)}
 
 
 def apply_edit(

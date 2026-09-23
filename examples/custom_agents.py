@@ -32,7 +32,7 @@ from raft import LocalPipeline
 from raft.defaults import CaseReview
 from raft.embedding.backend import EmbeddingBackend
 from raft.extraction.context import CaseContext
-from raft.tools import edit_state, query_case_sql, write_handoff_note
+from raft.tools import edit_state, query_case_sql, read_state, write_handoff_note
 
 ERROR_CATALOG = {
     "AUTH_CERT_EXPIRED": (
@@ -70,14 +70,14 @@ def build_pipeline(
         model=worker_model,
         model_settings=ModelSettings(store=False),
         instructions=WORKER_PROMPT,
-        tools=[query_case_sql, edit_state, write_handoff_note, lookup_error],
+        tools=[query_case_sql, read_state, edit_state, write_handoff_note, lookup_error],
     )
     reviewer = Agent[CaseContext](
         name="Support reviewer",
         model=reviewer_model,
         model_settings=ModelSettings(store=False),
         instructions=REVIEWER_PROMPT,
-        tools=[query_case_sql, edit_state, lookup_error],
+        tools=[query_case_sql, read_state, edit_state, lookup_error],
     )
     return LocalPipeline(
         output_dir,

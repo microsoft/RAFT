@@ -202,10 +202,10 @@ async def test_custom_pipeline_real_sdk_passes_retrieval_and_reopen(tmp_path, st
     assert review_agent.output_type is None
     assert pipeline.extraction["review_output_type"] is CaseReview
     assert [tool.name for tool in worker_agent.tools] == [
-        "query_case_sql", "edit_state", "write_handoff_note", "lookup_error",
+        "query_case_sql", "read_state", "edit_state", "write_handoff_note", "lookup_error",
     ]
     assert [tool.name for tool in review_agent.tools] == [
-        "query_case_sql", "edit_state", "lookup_error",
+        "query_case_sql", "read_state", "edit_state", "lookup_error",
     ]
 
     raw = [{"id": "support-1", "metadata": {}, "artifacts": [{}, {}]}]

@@ -366,6 +366,7 @@ def test_settings_are_local_to_their_stage_not_shared_globals(cells):
 
 def test_notebook_uses_package_handoff_tool_separate_from_output(cells):
     assert "write_handoff_note" in cells["setup"]
-    assert "tools = [query_case_sql, edit_state]" in cells["agents"]
+    assert "read_state" in cells["setup"]
+    assert "tools = [query_case_sql, read_state, edit_state]" in cells["agents"]
     assert "instructions=WORKER_INSTRUCTIONS, tools=[*tools, write_handoff_note]" in cells["agents"]
     assert "instructions=REVIEWER_INSTRUCTIONS, tools=tools" in cells["agents"]
