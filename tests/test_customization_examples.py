@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from agents import Agent
+from agents import Agent, ModelSettings, RunConfig
 from agents.tool_context import ToolContext
 from pydantic import ValidationError
 from test_execution import ScriptedModel, call, message, review_call
@@ -19,7 +19,7 @@ from examples.custom_extraction import (
     SupportEntity,
 )
 from examples.custom_text import case_to_text, format_case, state_to_text
-from examples.model_routing import round_robin_run_config
+from examples.model_routing import round_robin_run_config, weighted_run_config
 from raft import ExtractedCase
 from raft.defaults import REVIEWER_INSTRUCTIONS, WORKER_INSTRUCTIONS, CaseExtraction, CaseReview
 from raft.retrieval.types import RetrievalHit
@@ -163,8 +163,66 @@ def test_round_robin_routes_same_agent_without_mutating_it():
         round_robin_run_config([], reviewer_model=review)
 
 
+def test_weighted_callback_selects_role_specific_models_and_settings(monkeypatch):
+    first, second, review = (ScriptedModel([]) for _ in range(3))
+    fast = ModelSettings(reasoning={"effort": "low"}, max_tokens=8000)
+    thorough = ModelSettings(reasoning={"effort": "medium"}, max_tokens=16000)
+    calls = []
+    indices = iter([0, 1, 0])
+
+    def choices(population, *, weights, k):
+        calls.append((population, weights))
+        assert k == 1
+        return [population[next(indices)]]
+
+    monkeypatch.setattr(model_routing.random, "choices", choices)
+    configure = weighted_run_config(
+        worker_pool=[(first, fast, 70), (second, thorough, 30)],
+        reviewer_pool=[(review, thorough, 100)],
+    )
+    agent = Agent(name="unchanged", model=first, model_settings=ModelSettings(store=False))
+    original_settings = agent.model_settings
+    configs = [
+        configure(agent, SimpleNamespace(stage=stage))
+        for stage in ("worker", "worker", "reviewer")
+    ]
+    assert [config.model for config in configs] == [first, second, review]
+    assert [config.model_settings for config in configs] == [fast, thorough, thorough]
+    assert [weights for _, weights in calls] == [[70, 30], [70, 30], [100]]
+    assert len({id(config) for config in configs}) == 3
+    assert agent.model is first and agent.model_settings is original_settings
+    assert all(config.tracing_disabled for config in configs)
+    assert all(agent.model_settings.resolve(config.model_settings).store is False for config in configs)
+
+
+@pytest.mark.parametrize("role", ["worker_pool", "reviewer_pool"])
+@pytest.mark.parametrize("weights", [
+    [], [0, 0], [1, -1], [float("inf")], [float("nan")], [1e308, 1e308],
+])
+def test_weighted_callback_rejects_invalid_weights(role, weights):
+    model = ScriptedModel([])
+    settings = ModelSettings()
+    pools = {"worker_pool": [(model, settings, 1)], "reviewer_pool": [(model, settings, 1)]}
+    pools[role] = [(model, settings, weight) for weight in weights]
+    with pytest.raises(ValueError, match="weights must be finite, nonnegative"):
+        weighted_run_config(**pools)
+
+
+def test_weighted_callback_never_selects_a_zero_weight_entry():
+    excluded, selected = ScriptedModel([]), ScriptedModel([])
+    settings = ModelSettings()
+    pool = [(excluded, settings, 0), (selected, settings, 1)]
+    configure = weighted_run_config(worker_pool=pool, reviewer_pool=pool)
+    agent = Agent(name="same")
+    for stage in ("worker", "reviewer"):
+        assert configure(agent, SimpleNamespace(stage=stage)).model is selected
+
+
 @pytest.mark.parametrize("with_graph", [False, True])
-async def test_custom_pipeline_real_sdk_passes_retrieval_and_reopen(tmp_path, state, with_graph):
+@pytest.mark.parametrize("routing", ["round_robin", "weighted", "static"])
+async def test_custom_pipeline_real_sdk_passes_retrieval_and_reopen(
+    tmp_path, state, with_graph, routing, monkeypatch,
+):
     def worker_steps(output, note):
         return [
             [
@@ -182,18 +240,54 @@ async def test_custom_pipeline_real_sdk_passes_retrieval_and_reopen(tmp_path, st
     initial = state.model_copy(update={
         "timeline": state.timeline[:1], "root_cause": None, "resolution_steps": None,
     })
-    first = ScriptedModel(worker_steps(initial, "Check certificate validity."))
-    second = ScriptedModel(worker_steps(state, "Validity checked; rotation resolved the case."))
-    reviewer = ScriptedModel([
+    initial_steps = worker_steps(initial, "Check certificate validity.")
+    final_steps = worker_steps(state, "Validity checked; rotation resolved the case.")
+    review_steps = [
         [review_call({"extractable": True, "non_extractable_reasoning": None})],
         [message("Review complete.")],
-    ])
+    ]
+    first = ScriptedModel(initial_steps)
+    second = ScriptedModel(final_steps)
+    reviewer = ScriptedModel(review_steps)
+    chosen_settings = ModelSettings(
+        reasoning={"effort": "low"}, max_tokens=8000,
+        context_management=[{"type": "compaction", "compact_threshold": 80000}],
+    )
+    seen_settings = []
+
+    class SharedModel(ScriptedModel):
+        async def get_response(self, *args, **kwargs):
+            actual = kwargs["model_settings"]
+            seen_settings.append(actual)
+            assert actual.max_tokens == 8000
+            assert actual.reasoning == chosen_settings.reasoning
+            assert actual.context_management == chosen_settings.context_management
+            assert actual.store is False  # Inherited from the example agents.
+            return await super().get_response(*args, **kwargs)
+
+    if routing == "static":
+        configure = RunConfig(
+            model=SharedModel([*initial_steps, *final_steps, *review_steps]),
+            model_settings=chosen_settings, tracing_disabled=True,
+        )
+    elif routing == "weighted":
+        picks = iter([0, 1, 0])
+        monkeypatch.setattr(
+            model_routing.random, "choices",
+            lambda pool, *, weights, k: [pool[next(picks)]],
+        )
+        configure = weighted_run_config(
+            worker_pool=[(first, chosen_settings, 70), (second, chosen_settings, 30)],
+            reviewer_pool=[(reviewer, chosen_settings, 100)],
+        )
+    else:
+        configure = round_robin_run_config([first, second], reviewer_model=reviewer)
     unused = ScriptedModel([])
     backend = Embeddings()
     pipeline = build_pipeline(
         tmp_path, worker_model=unused, reviewer_model=unused,
         embedding_backend=backend, with_graph=with_graph,
-        run_config=round_robin_run_config([first, second], reviewer_model=reviewer),
+        run_config=configure,
     )
     pipeline.extraction.update(batch_budget={"unit": "chars", "limit": 2}, retries=0)
     worker_agent = pipeline.extraction["worker_agent"]
@@ -222,6 +316,8 @@ async def test_custom_pipeline_real_sdk_passes_retrieval_and_reopen(tmp_path, st
     assert [note["pass_number"] for note in case.execution["handoff_notes"]] == [1, 2]
     assert state_to_text(state) in backend.calls
     assert worker_agent.model is review_agent.model is unused
+    if routing == "static":
+        assert len(seen_settings) == 6  # Two calls per worker pass, plus review.
 
     reopened = build_pipeline(
         tmp_path, worker_model=unused, reviewer_model=unused, embedding_backend=backend,
@@ -245,8 +341,9 @@ async def test_custom_pipeline_real_sdk_passes_retrieval_and_reopen(tmp_path, st
 
 
 @pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("routing", ["static", "weighted", "round_robin"])
 async def test_endpoint_example_configures_distinct_clients_and_closes_them(
-    monkeypatch, tmp_path, fail,
+    monkeypatch, tmp_path, fail, routing,
 ):
     for key, value in {
         "OPENAI_API_KEY": "test-primary-key",
@@ -260,6 +357,14 @@ async def test_endpoint_example_configures_distinct_clients_and_closes_them(
     clients = []
     raw = [{"id": "test", "metadata": {}, "artifacts": []}]
     expected = {"extraction": {"failed_cases": []}, "embedding": {"failed_cases": []}}
+    picks = iter([0, 1, 0])
+    selections = []
+
+    def choices(pool, *, weights, k):
+        selections.append(weights)
+        return [pool[next(picks)]]
+
+    monkeypatch.setattr(model_routing.random, "choices", choices)
 
     def build(output_dir, **options):
         assert output_dir == tmp_path
@@ -273,9 +378,23 @@ async def test_endpoint_example_configures_distinct_clients_and_closes_them(
         configure = options["run_config"]
         worker = Agent(name="same-agent")
         context = SimpleNamespace(stage="worker")
-        assert configure(worker, context).model is first
-        assert configure(worker, context).model is second
-        assert configure(worker, SimpleNamespace(stage="reviewer")).model is second
+        if routing == "static":
+            assert isinstance(configure, RunConfig)
+            assert configure.model is first
+            assert configure.model_settings.max_tokens == 8000
+            assert configure.model_settings.store is False
+        else:
+            first_selection = configure(worker, context)
+            second_selection = configure(worker, context)
+            review_selection = configure(worker, SimpleNamespace(stage="reviewer"))
+            assert first_selection.model is first
+            assert second_selection.model is second
+            assert review_selection.model is second
+            if routing == "weighted":
+                assert selections == [[70, 30], [70, 30], [100]]
+                assert first_selection.model_settings.max_tokens == 8000
+                assert second_selection.model_settings.max_tokens == 16000
+                assert review_selection.model_settings is second_selection.model_settings
 
         async def index(cases):
             assert cases is raw
@@ -289,7 +408,12 @@ async def test_endpoint_example_configures_distinct_clients_and_closes_them(
     monkeypatch.setattr(model_routing, "build_pipeline", build)
     if fail:
         with pytest.raises(RuntimeError, match="Example indexing failure"):
-            await model_routing.index_with_model_pool(raw, tmp_path)
+            await model_routing.index_with_model_pool(raw, tmp_path, routing=routing)
     else:
-        assert await model_routing.index_with_model_pool(raw, tmp_path) is expected
+        assert await model_routing.index_with_model_pool(raw, tmp_path, routing=routing) is expected
     assert all(client.is_closed() for client in clients)
+
+
+async def test_endpoint_example_rejects_unknown_routing_before_client_setup(tmp_path):
+    with pytest.raises(ValueError, match="routing must be"):
+        await model_routing.index_with_model_pool([], tmp_path, routing="invalid")

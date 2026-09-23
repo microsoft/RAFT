@@ -42,7 +42,27 @@ as root cause and resolution, for expansion beyond the initial matches.
 
 ## Per-case extraction workflow
 
-[![Worker-reviewer extraction: bounded artifact batches update an evolving case state; both agents query source evidence, and the reviewer can inspect revision history.](assets/agent-workflow.png)](assets/agent-workflow.png)
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Arial, sans-serif", "fontSize": "15px", "lineColor": "#64748b", "edgeLabelBackground": "#f8fafc"}, "flowchart": {"curve": "basis", "rankSpacing": 36}}}%%
+flowchart LR
+    accTitle: RAFT worker and reviewer workflow
+    accDescr: Ordered case artifacts are processed in worker passes. Each successful pass commits case state and an optional handoff note. State and notes carry into the next batch. After all artifacts are processed, the reviewer checks evidence and revisions, edits the case and assessment, and commits both together.
+
+    source["Case artifacts<br/>Ordered batches"]:::source
+    worker("<b>Worker pass</b><br/>Read / edit case"):::worker
+    reviewer("<b>Final reviewer</b><br/>Verify and refine"):::reviewer
+    result["Case + assessment<br/>Committed together"]:::result
+
+    source --> worker
+    worker -->|"Next batch<br/>Carry state + notes"| worker
+    worker -->|"All batches complete"| reviewer
+    reviewer --> result
+
+    classDef source fill:#f1f5f9,stroke:#94a3b8,color:#0f172a
+    classDef worker fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a,stroke-width:2px
+    classDef reviewer fill:#ede9fe,stroke:#8b5cf6,color:#4c1d95,stroke-width:2px
+    classDef result fill:#ccfbf1,stroke:#14b8a6,color:#134e4a,stroke-width:2px
+```
 
 RAFT uses the **[OpenAI Agents SDK](https://github.com/openai/openai-agents-python)**
 as its agent backend to process each case through a **worker + final reviewer** workflow:
@@ -60,7 +80,7 @@ embedding text, and model clients to your domain without changing the pipeline.
 The [example notebook](examples/jira_walkthrough.ipynb) shows how.
 For focused Python examples, see [models and prompts](examples/custom_extraction.py),
 [text formatters](examples/custom_text.py), [agents and tools](examples/custom_agents.py),
-and [per-run model/endpoint routing](examples/model_routing.py).
+and [static or weighted per-run configuration](examples/model_routing.py).
 
 ## Quickstart
 
